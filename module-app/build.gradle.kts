@@ -1,6 +1,5 @@
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.ksp)
 }
 
 android {
@@ -64,9 +63,8 @@ androidComponents {
 }
 
 dependencies {
-    compileOnly(libs.rovo89.xposed.api)
-    implementation(libs.yukihookapi)
-    ksp(libs.yukihookapi.ksp.xposed)
+    compileOnly(libs.libxposed.api)
+    implementation(libs.libxposed.service)
     implementation(platform(libs.kavaref.bom))
     implementation(libs.kavaref.core)
     implementation(libs.kavaref.android)
@@ -76,7 +74,9 @@ dependencies {
     implementation(libs.microsoft.appcenter.analytics)
     implementation(libs.microsoft.appcenter.crashes)
     implementation(libs.libsu)
-    implementation(libs.drawabletoolbox)
+    implementation(libs.drawabletoolbox) {
+        exclude(group = "com.android.support")
+    }
     implementation(libs.gson)
     implementation(libs.okhttp)
     implementation(libs.androidx.core.ktx)

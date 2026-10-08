@@ -26,6 +26,7 @@ package com.fankes.apperrorstracking.ui.activity.main
 import android.os.Build
 import androidx.core.view.isVisible
 import com.fankes.apperrorstracking.R
+import com.fankes.apperrorstracking.application.AppErrorsApplication
 import com.fankes.apperrorstracking.const.ModuleVersion
 import com.fankes.apperrorstracking.data.ConfigData
 import com.fankes.apperrorstracking.data.factory.bind
@@ -47,7 +48,6 @@ import com.fankes.apperrorstracking.utils.tool.FrameworkTool
 import com.fankes.apperrorstracking.utils.tool.GithubReleaseTool
 import com.fankes.projectpromote.ProjectPromote
 import com.highcapable.betterandroid.ui.extension.view.isUnderline
-import com.highcapable.yukihookapi.YukiHookAPI
 
 class MainActivity : BaseActivity<ActivityMainBinding>() {
 
@@ -58,6 +58,10 @@ class MainActivity : BaseActivity<ActivityMainBinding>() {
 
         /** 模块是否有效 */
         var isModuleValied = false
+
+        /** 模块是否激活 */
+        val isModuleActive: Boolean
+            get() = AppErrorsApplication.xposedService != null || isModuleValied
     }
 
     override fun onCreate() {
@@ -71,7 +75,7 @@ class MainActivity : BaseActivity<ActivityMainBinding>() {
             }
         }
         /** 推广、恰饭 */
-        if (YukiHookAPI.Status.isXposedModuleActive) ProjectPromote.show(activity = this, ModuleVersion.toString())
+        if (isModuleActive) ProjectPromote.show(activity = this, ModuleVersion.toString())
         /** 显示开发者提示 */
         if (ConfigData.isShowDeveloperNotice)
             showDialog {
@@ -144,26 +148,32 @@ class MainActivity : BaseActivity<ActivityMainBinding>() {
 
     /** 刷新模块状态 */
     private fun refreshModuleStatus() {
+        val isActive = isModuleActive
         binding.mainLinStatus.setBackgroundResource(
             when {
-                YukiHookAPI.Status.isXposedModuleActive && isModuleValied.not() -> R.drawable.bg_yellow_round
-                YukiHookAPI.Status.isXposedModuleActive -> R.drawable.bg_green_round
+                isActive && isModuleValied.not() -> R.drawable.bg_yellow_round
+                isActive -> R.drawable.bg_green_round
                 else -> R.drawable.bg_dark_round
             }
         )
         binding.mainImgStatus.setImageResource(
             when {
-                YukiHookAPI.Status.isXposedModuleActive -> R.drawable.ic_success
+                isActive -> R.drawable.ic_success
                 else -> R.drawable.ic_warn
             }
         )
         binding.mainTextStatus.text = when {
-            YukiHookAPI.Status.isXposedModuleActive && isModuleValied.not() -> getString(R.string.module_not_fully_activated)
-            YukiHookAPI.Status.isXposedModuleActive -> getString(R.string.module_is_activated)
+            isActive && isModuleValied.not() -> getString(R.string.module_not_fully_activated)
+            isActive -> getString(R.string.module_is_activated)
             else -> getString(R.string.module_not_activated)
         }
-        binding.mainTextApiWay.isVisible = YukiHookAPI.Status.isXposedModuleActive
-        binding.mainTextApiWay.text = "Activated by ${YukiHookAPI.Status.Executor.name} API ${YukiHookAPI.Status.Executor.apiLevel}"
+        binding.mainTextApiWay.isVisible = isActive
+        val service = AppErrorsApplication.xposedService
+        binding.mainTextApiWay.text = if (service != null) {
+            "Activated by ${service.frameworkName} API ${service.apiVersion}"
+        } else {
+            "Activated by libxposed (System Framework)"
+        }
     }
 
     /**
@@ -171,7 +181,7 @@ class MainActivity : BaseActivity<ActivityMainBinding>() {
      * @param callback 激活后回调
      */
     private inline fun whenActivated(callback: () -> Unit) {
-        if (YukiHookAPI.Status.isXposedModuleActive) callback() else toast(getString(R.string.module_not_activated))
+        if (isModuleActive) callback() else toast(getString(R.string.module_not_activated))
     }
 
     override fun onResume() {

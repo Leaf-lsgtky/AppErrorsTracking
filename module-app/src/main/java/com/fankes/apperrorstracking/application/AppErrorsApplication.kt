@@ -21,20 +21,49 @@
  */
 package com.fankes.apperrorstracking.application
 
+import android.app.Application
 import androidx.appcompat.app.AppCompatDelegate
 import com.fankes.apperrorstracking.data.ConfigData
 import com.fankes.apperrorstracking.utils.tool.AppAnalyticsTool
-import com.highcapable.yukihookapi.hook.xposed.application.ModuleApplication
+import com.fankes.apperrorstracking.utils.tool.ModuleLog
+import io.github.libxposed.service.XposedService
+import io.github.libxposed.service.XposedServiceHelper
 
-class AppErrorsApplication : ModuleApplication() {
+class AppErrorsApplication : Application(), XposedServiceHelper.OnServiceListener {
+
+    companion object {
+        @Volatile
+        var xposedService: XposedService? = null
+            private set
+    }
 
     override fun onCreate() {
         super.onCreate()
+        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            android.util.Log.e("AppErrorsCrash", "CRASH in thread ${thread.name}: ${throwable.message}", throwable)
+            defaultHandler?.uncaughtException(thread, throwable)
+        }
+        runCatching {
+            XposedServiceHelper.registerListener(this)
+        }.onFailure {
+            ModuleLog.warn("Failed to register XposedServiceHelper listener: ${it.message}")
+        }
         /** 跟随系统夜间模式 */
         AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM)
         /** 装载存储控制类 */
         ConfigData.init(this)
         /** 装载 App Center */
         AppAnalyticsTool.init(this)
+    }
+
+    override fun onServiceBind(service: XposedService) {
+        xposedService = service
+        ModuleLog.info("XposedService bound: ${service.frameworkName} API ${service.apiVersion}")
+    }
+
+    override fun onServiceDied(service: XposedService) {
+        xposedService = null
+        ModuleLog.warn("XposedService died")
     }
 }

@@ -33,8 +33,10 @@ import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
+import com.google.android.material.snackbar.Snackbar
 import android.content.pm.PackageManager.PackageInfoFlags
 import android.content.res.Configuration
 import android.content.res.Resources
@@ -53,14 +55,7 @@ import androidx.core.content.res.ResourcesCompat
 import androidx.core.graphics.drawable.IconCompat
 import com.fankes.apperrorstracking.R
 import com.fankes.apperrorstracking.wrapper.BuildConfigWrapper
-import com.google.android.material.snackbar.Snackbar
-import com.highcapable.yukihookapi.hook.factory.field
-import com.highcapable.yukihookapi.hook.factory.method
-import com.highcapable.yukihookapi.hook.log.YLog
-import com.highcapable.yukihookapi.hook.type.android.ApplicationInfoClass
-import com.highcapable.yukihookapi.hook.type.android.ContextClass
-import com.highcapable.yukihookapi.hook.type.android.IntentClass
-import com.highcapable.yukihookapi.hook.type.android.UserHandleClass
+import com.fankes.apperrorstracking.utils.tool.ModuleLog
 import com.topjohnwu.superuser.Shell
 import java.io.Serializable
 import java.math.RoundingMode
@@ -155,7 +150,9 @@ fun Context.listOfPackages() = runCatching {
  * @return [String] 无法获取时返回 ""
  */
 fun Context.appNameOf(packageName: String = getPackageName()) =
-    getPackageInfoCompat(packageName)?.applicationInfo?.loadLabel(packageManager)?.toString() ?: ""
+    runCatching {
+        getPackageInfoCompat(packageName)?.applicationInfo?.loadLabel(packageManager)?.toString()
+    }.getOrNull() ?: ""
 
 /**
  * 得到 APP 版本信息与版本号
@@ -199,7 +196,9 @@ fun Context.appMinSdkOf(packageName: String = getPackageName()) = getPackageInfo
  * @return [String] 无法获取时返回 ""
  */
 fun Context.appCpuAbiOf(packageName: String = getPackageName()) = runCatching {
-    ApplicationInfoClass.field { name = "primaryCpuAbi" }.get(getPackageInfoCompat(packageName)?.applicationInfo).string()
+    val appInfo = getPackageInfoCompat(packageName)?.applicationInfo
+    val field = ApplicationInfo::class.java.getDeclaredField("primaryCpuAbi").apply { isAccessible = true }
+    field.get(appInfo) as? String ?: ""
 }.getOrNull() ?: ""
 
 /**
@@ -208,7 +207,9 @@ fun Context.appCpuAbiOf(packageName: String = getPackageName()) = runCatching {
  * @return [Drawable] 无发获取时返回 [R.drawable.ic_android]
  */
 fun Context.appIconOf(packageName: String = getPackageName()) =
-    getPackageInfoCompat(packageName)?.applicationInfo?.loadIcon(packageManager) ?: resources.drawableOf(R.drawable.ic_android)
+    runCatching {
+        getPackageInfoCompat(packageName)?.applicationInfo?.loadIcon(packageManager)
+    }.getOrNull() ?: resources.drawableOf(R.drawable.ic_android)
 
 /**
  * 获取 [Serializable] (兼容)
@@ -290,7 +291,7 @@ fun Long.toUtcTime() = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS", Locale.ROOT
 fun Context.toast(msg: String) {
     runCatching {
         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
-    }.onFailure { YLog.warn(msg) }
+    }.onFailure { ModuleLog.warn(msg) }
 }
 
 /**
@@ -353,12 +354,11 @@ inline fun <reified T : Activity> Context.navigate(isOutSide: Boolean = false, i
  * @param content 要复制的文本
  */
 fun Context.copyToClipboard(content: String) = runCatching {
-    (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).apply {
-        setPrimaryClip(ClipData.newPlainText(null, content))
-        (primaryClip?.getItemAt(0)?.text ?: "").also {
-            if (it != content) toast(getString(R.string.copy_fail)) else toast(getString(R.string.copied))
-        }
-    }
+    val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    cm.setPrimaryClip(ClipData.newPlainText(null, content))
+    toast(getString(R.string.copied))
+}.onFailure {
+    toast(getString(R.string.copy_fail))
 }
 
 /**
@@ -404,10 +404,12 @@ fun Context.isAppCanOpened(packageName: String = this.packageName) =
  * @param userId APP 用户 ID - 默认 0
  */
 fun Context.openApp(packageName: String = getPackageName(), userId: Int = 0) = runCatching {
-    ContextClass.method {
-        name = "startActivityAsUser"
-        param(IntentClass, UserHandleClass)
-    }.get(this).call(packageManager.getLaunchIntentForPackage(packageName), UserHandleClass.method { name = "of" }.get().call(userId))
+    val intent = packageManager.getLaunchIntentForPackage(packageName) ?: return@runCatching
+    val userHandleClass = Class.forName("android.os.UserHandle")
+    val ofMethod = userHandleClass.getMethod("of", Int::class.javaPrimitiveType)
+    val userHandle = ofMethod.invoke(null, userId)
+    val startActivityAsUserMethod = Context::class.java.getMethod("startActivityAsUser", Intent::class.java, userHandleClass)
+    startActivityAsUserMethod.invoke(this, intent, userHandle)
 }.onFailure { toast(msg = "Cannot start \"$packageName\"${if (userId > 0) " for user $userId" else ""}") }
 
 /**

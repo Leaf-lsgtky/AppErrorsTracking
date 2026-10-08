@@ -25,10 +25,13 @@ package com.fankes.apperrorstracking.hook.entity
 
 import android.app.ApplicationErrorReport
 import android.app.Dialog
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
+import android.content.res.Resources
 import android.os.Build
 import android.os.Bundle
 import android.os.Message
@@ -57,309 +60,369 @@ import com.fankes.apperrorstracking.utils.factory.pushNotify
 import com.fankes.apperrorstracking.utils.factory.toArrayList
 import com.fankes.apperrorstracking.utils.factory.toast
 import com.fankes.apperrorstracking.utils.tool.FrameworkTool
+import com.fankes.apperrorstracking.utils.tool.ModuleLog
 import com.fankes.apperrorstracking.wrapper.BuildConfigWrapper
-import com.highcapable.kavaref.KavaRef.Companion.resolve
-import com.highcapable.kavaref.extension.VariousClass
-import com.highcapable.yukihookapi.hook.entity.YukiBaseHooker
-import com.highcapable.yukihookapi.hook.log.YLog
+import io.github.libxposed.api.XposedModule
+import java.lang.reflect.Field
+import java.lang.reflect.Method
 
-object FrameworkHooker : YukiBaseHooker() {
+object FrameworkHooker {
 
-    private val UserControllerClass by lazyClass("com.android.server.am.UserController")
-    private val AppErrorsClass by lazyClass("com.android.server.am.AppErrors")
-    private val AppErrorDialogClass by lazyClass("com.android.server.am.AppErrorDialog")
-    private val AppErrorDialog_DataClass by lazyClass($$"com.android.server.am.AppErrorDialog$Data")
-    private val ProcessRecordClass by lazyClass("com.android.server.am.ProcessRecord")
-    private val ActivityManagerServiceClass by lazyClassOrNull("com.android.server.am.ActivityManagerService")
-    private val ActivityTaskManagerService_LocalServiceClass by lazyClassOrNull($$"com.android.server.wm.ActivityTaskManagerService$LocalService")
+    private lateinit var module: XposedModule
 
-    private val PackageListClass by lazyClassOrNull(
-        VariousClass(
-            $$"com.android.server.am.ProcessRecord$PackageList",
-            "com.android.server.am.PackageList"
-        )
-    )
-    private val ErrorDialogControllerClass by lazyClassOrNull(
-        VariousClass(
-            $$"com.android.server.am.ProcessRecord$ErrorDialogController",
-            "com.android.server.am.ErrorDialogController"
-        )
-    )
+    @Volatile
+    private var systemContext: Context? = null
+
+    @Volatile
+    private var cachedModuleResources: Resources? = null
+
+    @Volatile
+    private var isHostInitialized = false
 
     /** 已忽略错误的 APP 数组 - 直到重新解锁 */
-    private var mutedErrorsIfUnlockApps = mutableSetOf<String>()
+    private val mutedErrorsIfUnlockApps = mutableSetOf<String>()
 
     /** 已忽略错误的 APP 数组 - 直到重新启动 */
-    private var mutedErrorsIfRestartApps = mutableSetOf<String>()
+    private val mutedErrorsIfRestartApps = mutableSetOf<String>()
+
+    private fun findClass(className: String, classLoader: ClassLoader): Class<*>? = runCatching {
+        Class.forName(className, false, classLoader)
+    }.getOrNull()
+
+    private fun findMethod(clazz: Class<*>?, name: String, vararg paramTypes: Class<*>): Method? {
+        if (clazz == null) return null
+        return runCatching { clazz.getDeclaredMethod(name, *paramTypes).apply { isAccessible = true } }.getOrNull()
+            ?: runCatching { clazz.getMethod(name, *paramTypes).apply { isAccessible = true } }.getOrNull()
+            ?: clazz.declaredMethods.firstOrNull { it.name == name && it.parameterTypes.contentEquals(paramTypes) }?.apply { isAccessible = true }
+    }
+
+    private fun findField(clazz: Class<*>?, name: String): Field? {
+        if (clazz == null) return null
+        var cur: Class<*>? = clazz
+        while (cur != null && cur != Any::class.java) {
+            val f = runCatching { cur.getDeclaredField(name).apply { isAccessible = true } }.getOrNull()
+            if (f != null) return f
+            cur = cur.superclass
+        }
+        return null
+    }
+
+    private fun getContextFromInstance(instance: Any?): Context? {
+        if (instance == null) return null
+        return runCatching {
+            var clazz: Class<*>? = instance.javaClass
+            while (clazz != null && clazz != Any::class.java) {
+                val field = clazz.declaredFields.firstOrNull { it.name == "mContext" || it.type == Context::class.java }
+                if (field != null) {
+                    field.isAccessible = true
+                    val ctx = field.get(instance) as? Context
+                    if (ctx != null) return ctx
+                }
+                clazz = clazz.superclass
+            }
+            // For AppErrors: it holds mService (ActivityManagerService) which has mContext
+            val service = runCatching {
+                instance.javaClass.declaredFields.firstOrNull { it.name == "mService" }?.apply { isAccessible = true }?.get(instance)
+            }.getOrNull()
+            if (service != null) {
+                var sClazz: Class<*>? = service.javaClass
+                while (sClazz != null && sClazz != Any::class.java) {
+                    val sField = sClazz.declaredFields.firstOrNull { it.name == "mContext" || it.type == Context::class.java }
+                    if (sField != null) {
+                        sField.isAccessible = true
+                        val sCtx = sField.get(service) as? Context
+                        if (sCtx != null) return sCtx
+                    }
+                    sClazz = sClazz.superclass
+                }
+            }
+            null
+        }.getOrNull()
+    }
+
+    private fun getSystemContextFromActivityThread(): Context? {
+        return runCatching {
+            val activityThreadClass = Class.forName("android.app.ActivityThread")
+            val currentActivityThread = activityThreadClass.getMethod("currentActivityThread").invoke(null)
+            activityThreadClass.getMethod("getSystemContext").invoke(currentActivityThread) as? Context
+        }.getOrNull()
+    }
+
+    private fun getModuleResources(context: Context): Resources {
+        cachedModuleResources?.let { return it }
+        return runCatching {
+            val moduleAppInfo = module.moduleApplicationInfo
+            context.packageManager.getResourcesForApplication(moduleAppInfo)
+        }.getOrElse {
+            context.resources
+        }.also {
+            cachedModuleResources = it
+        }
+    }
+
+    private fun refreshModuleAppResources(context: Context) {
+        cachedModuleResources = null
+        getModuleResources(context)
+    }
 
     /**
      * APP 进程异常数据定义类
-     * @param errors [AppErrorsClass] 实例
-     * @param proc [ProcessRecordClass] 实例
-     * @param resultData [AppErrorDialog_DataClass] 实例 - 默认空
      */
-    private class AppErrorsProcessData(errors: Any?, proc: Any?, resultData: Any? = null) {
+    private class AppErrorsProcessData(private val errors: Any?, private val proc: Any, private val resultData: Any? = null) {
 
-        /**
-         * 获取当前包列表实例
-         * @return [Any] or null
-         */
         private val pkgList by lazy {
-            ProcessRecordClass.resolve().optional(silent = true)
-                .firstMethodOrNull {
-                    name = "getPkgList"
-                    emptyParameters()
-                }?.of(proc)?.invoke()
-                ?: ProcessRecordClass.resolve().optional(silent = true)
-                    .firstFieldOrNull {
-                        name { it.endsWith("pkgList", true) }
-                    }?.of(proc)?.get()
+            runCatching {
+                proc.javaClass.methods.firstOrNull { it.name == "getPkgList" && it.parameterTypes.isEmpty() }?.invoke(proc)
+            }.getOrNull() ?: runCatching {
+                findField(proc.javaClass, "mPkgList")?.get(proc) ?: findField(proc.javaClass, "pkgList")?.get(proc)
+            }.getOrNull()
         }
 
-        /**
-         * 获取当前包列表数组大小
-         * @return [Int]
-         */
         private val pkgListSize by lazy {
-            PackageListClass?.resolve()?.optional(silent = true)
-                ?.firstMethodOrNull {
-                    name = "size"
-                    emptyParameters()
-                }?.of(pkgList)?.invoke()
-                ?: ProcessRecordClass.resolve().optional(silent = true)
-                    .firstFieldOrNull { name = "pkgList" }
-                    ?.of(proc)?.get<ArrayMap<*, *>>()?.size ?: -1
-        }
-
-        /**
-         * 获取当前 pid 信息
-         * @return [Int]
-         */
-        val pid by lazy {
-            ProcessRecordClass.resolve().optional()
-                .firstFieldOrNull {
-                    name { it == "mPid" || it == "pid" }
-                    superclass()
-                }?.of(proc)?.get<Int>() ?: 0
-        }
-
-        /**
-         * 获取当前用户 ID 信息
-         * @return [Int]
-         */
-        val userId by lazy {
-            ProcessRecordClass.resolve().optional()
-                .firstFieldOrNull {
-                    name = "userId"
-                    superclass()
+            runCatching {
+                if (pkgList != null) {
+                    pkgList?.javaClass?.methods?.firstOrNull { it.name == "size" && it.parameterTypes.isEmpty() }?.invoke(pkgList) as? Int
+                        ?: (pkgList as? ArrayMap<*, *>)?.size
+                        ?: (pkgList as? Collection<*>)?.size
+                        ?: -1
+                } else {
+                    (findField(proc.javaClass, "pkgList")?.get(proc) as? ArrayMap<*, *>)?.size ?: -1
                 }
-                ?.of(proc)?.get<Int>() ?: 0
+            }.getOrNull() ?: -1
         }
 
-        /**
-         * 获取当前 APP 信息
-         * @return [ApplicationInfo] or null
-         */
-        val appInfo by lazy {
-            ProcessRecordClass.resolve().optional()
-                .firstFieldOrNull {
-                    name = "info"
-                    superclass()
+        val pid: Int by lazy {
+            runCatching {
+                (findField(proc.javaClass, "mPid")?.get(proc) as? Int)
+                    ?: (findField(proc.javaClass, "pid")?.get(proc) as? Int)
+                    ?: 0
+            }.getOrNull() ?: 0
+        }
+
+        val userId: Int by lazy {
+            runCatching {
+                (findField(proc.javaClass, "userId")?.get(proc) as? Int) ?: 0
+            }.getOrNull() ?: 0
+        }
+
+        val appInfo: ApplicationInfo? by lazy {
+            runCatching {
+                (findField(proc.javaClass, "info")?.get(proc) as? ApplicationInfo)
+                    ?: (findField(proc.javaClass, "mInfo")?.get(proc) as? ApplicationInfo)
+            }.getOrNull()
+        }
+
+        val processName: String by lazy {
+            runCatching {
+                (findField(proc.javaClass, "processName")?.get(proc) as? String)
+                    ?: (findField(proc.javaClass, "mProcessName")?.get(proc) as? String)
+                    ?: ""
+            }.getOrNull() ?: ""
+        }
+
+        val packageName: String = appInfo?.packageName ?: processName
+
+        val isActualApp: Boolean = pkgListSize == 1 && appInfo != null
+
+        val isMainProcess: Boolean = packageName == processName
+
+        val isBackgroundProcess: Boolean by lazy {
+            runCatching {
+                val service = findField(errors?.javaClass, "mService")?.get(errors)
+                val userController = findField(service?.javaClass, "mUserController")?.get(service)
+                val method = userController?.javaClass?.methods?.firstOrNull {
+                    it.name == "getCurrentProfileIds" || it.name == "getCurrentProfileIdsLocked"
                 }
-                ?.of(proc)?.get<ApplicationInfo>()
+                val profileIds = method?.invoke(userController) as? IntArray
+                if (profileIds != null && profileIds.isNotEmpty()) {
+                    profileIds.any { it != userId }
+                } else false
+            }.getOrNull() ?: false
         }
 
-        /**
-         * 获取当前进程名称
-         * @return [String]
-         */
-        val processName by lazy {
-            ProcessRecordClass.resolve().optional()
-                .firstFieldOrNull {
-                    name = "processName"
-                    superclass()
-                }
-                ?.of(proc)?.get<String>() ?: ""
-        }
-
-        /**
-         * 获取当前 APP、进程 包名
-         * @return [String]
-         */
-        val packageName = appInfo?.packageName ?: processName
-
-        /**
-         * 获取当前进程是否为可被启动的 APP - 非框架 APP
-         * @return [Boolean]
-         */
-        val isActualApp = pkgListSize == 1 && appInfo != null
-
-        /**
-         * 获取当前进程是否为主进程
-         * @return [Boolean]
-         */
-        val isMainProcess = packageName == processName
-
-        /**
-         * 获取当前进程是否为后台进程
-         * @return [Boolean]
-         */
-        val isBackgroundProcess by lazy {
-            UserControllerClass.resolve().optional()
-                .firstMethodOrNull { name { it == "getCurrentProfileIds" || it == "getCurrentProfileIdsLocked" } }
-                ?.of(ActivityManagerServiceClass?.resolve()?.optional()?.firstFieldOrNull { name = "mUserController" }
-                    ?.of(AppErrorsClass.resolve().optional().firstFieldOrNull { name = "mService" }?.of(errors)?.get())?.getQuietly())
-                ?.invokeQuietly<IntArray>()?.takeIf { it.isNotEmpty() }?.any { it != userId } ?: false
-        }
-
-        /**
-         * 获取当前进程是否短时内重复崩溃
-         * @return [Boolean]
-         */
-        val isRepeatingCrash by lazy {
+        val isRepeatingCrash: Boolean by lazy {
             resultData?.let {
-                AppErrorDialog_DataClass.resolve().optional()
-                    .firstFieldOrNull { name = "repeating" }
-                    ?.of(it)?.get<Boolean>() == true
+                runCatching {
+                    findField(it.javaClass, "repeating")?.get(it) as? Boolean
+                }.getOrNull()
             } ?: false
         }
     }
 
-    /** 注册生命周期 */
-    private fun registerLifecycle() {
-        onAppLifecycle {
-            /** 解锁后清空已记录的忽略错误 APP */
-            registerReceiver(Intent.ACTION_USER_PRESENT) { _, _ -> mutedErrorsIfUnlockApps.clear() }
-            /** 刷新模块 Resources 缓存 */
-            registerReceiver(Intent.ACTION_LOCALE_CHANGED) { _, _ -> refreshModuleAppResources() }
-            /** 启动时从本地获取异常记录数据 */
-            onCreate { AppErrorsRecordData.init(context = this) }
-        }
-        FrameworkTool.Host.with(instance = this) {
-            onRefreshFrameworkPrefsData {
-                /** 必要的延迟防止 Sp 存储不刷新 */
-                SystemClock.sleep(100)
-                /** 刷新存储类 */
-                AppErrorsConfigData.refresh()
-                if (prefs.isPreferencesAvailable.not()) YLog.warn("Cannot refreshing app errors config data, preferences is not available")
+    private fun ensureInitializedWithContext(context: Context) {
+        if (isHostInitialized) return
+        synchronized(this) {
+            if (isHostInitialized) return
+
+            // ActivityManager must be ready before registering receivers, otherwise NPE occurs
+            val isAmReady = runCatching {
+                Class.forName("android.app.ActivityManager").getMethod("getService").invoke(null) != null
+            }.getOrElse { false }
+            if (!isAmReady) {
+                ModuleLog.info("ActivityManager not ready yet, postponing ensureInitializedWithContext")
+                return
             }
-            onOpenAppUsedFramework {
-                appContext?.openApp(it.first, it.second)
-                YLog.info("Opened \"${it.first}\"${it.second.takeIf { e -> e > 0 }?.let { e -> " --user $e" } ?: ""}")
-            }
-            onPushAppErrorInfoData {
-                AppErrorsRecordData.allData.firstOrNull { e -> e.pid == it } ?: run {
-                    YLog.warn("Cannot received crash application data --pid $it")
-                    AppErrorsInfoBean()
-                }
-            }
-            onPushAppErrorsInfoData { AppErrorsRecordData.allData.toArrayList() }
-            onRemoveAppErrorsInfoData {
-                YLog.info("Removed app errors info data for package \"${it.packageName}\"")
-                AppErrorsRecordData.remove(it)
-            }
-            onClearAppErrorsInfoData {
-                YLog.info("Cleared all app errors info data, size ${AppErrorsRecordData.allData.size}")
-                AppErrorsRecordData.clearAll()
-            }
-            onMutedErrorsIfUnlock {
-                mutedErrorsIfUnlockApps.add(it)
-                YLog.info("Muted \"$it\" until unlocks")
-            }
-            onMutedErrorsIfRestart {
-                mutedErrorsIfRestartApps.add(it)
-                YLog.info("Muted \"$it\" until restarts")
-            }
-            onPushMutedErrorsAppsData {
-                arrayListOf<MutedErrorsAppBean>().apply {
-                    mutedErrorsIfUnlockApps.takeIf { it.isNotEmpty() }
-                        ?.forEach { add(MutedErrorsAppBean(MutedErrorsAppBean.MuteType.UNTIL_UNLOCKS, it)) }
-                    mutedErrorsIfRestartApps.takeIf { it.isNotEmpty() }
-                        ?.forEach { add(MutedErrorsAppBean(MutedErrorsAppBean.MuteType.UNTIL_REBOOTS, it)) }
-                }
-            }
-            onUnmuteErrorsApp {
-                when (it.type) {
-                    MutedErrorsAppBean.MuteType.UNTIL_UNLOCKS -> {
-                        YLog.info("Unmuted if unlocks errors app \"${it.packageName}\"")
-                        mutedErrorsIfUnlockApps.remove(it.packageName)
+
+            systemContext = context
+
+            runCatching {
+                val filter1 = IntentFilter(Intent.ACTION_USER_PRESENT)
+                context.registerReceiver(object : BroadcastReceiver() {
+                    override fun onReceive(c: Context?, intent: Intent?) {
+                        mutedErrorsIfUnlockApps.clear()
                     }
-                    MutedErrorsAppBean.MuteType.UNTIL_REBOOTS -> {
-                        YLog.info("Unmuted if restarts errors app \"${it.packageName}\"")
-                        mutedErrorsIfRestartApps.remove(it.packageName)
+                }, filter1)
+
+                val filter2 = IntentFilter(Intent.ACTION_LOCALE_CHANGED)
+                context.registerReceiver(object : BroadcastReceiver() {
+                    override fun onReceive(c: Context?, intent: Intent?) {
+                        refreshModuleAppResources(context)
                     }
-                }
+                }, filter2)
+            }.onFailure {
+                ModuleLog.warn("Failed to register system lifecycle receivers: ${it.message}")
             }
-            onUnmuteAllErrorsApps {
-                YLog.info("Unmute all errors apps --unlocks ${mutedErrorsIfUnlockApps.size} --restarts ${mutedErrorsIfRestartApps.size}")
-                mutedErrorsIfUnlockApps.clear()
-                mutedErrorsIfRestartApps.clear()
+
+            runCatching {
+                AppErrorsRecordData.init(context)
+            }.onFailure {
+                ModuleLog.error("Failed to init AppErrorsRecordData", it)
             }
-            onPushAppListData { filters ->
-                appContext?.let { context ->
-                    context.listOfPackages()
-                        .filter { it.packageName.let { e -> e != "android" && e != BuildConfigWrapper.APPLICATION_ID } }
-                        .let { info ->
-                            arrayListOf<AppInfoBean>().apply {
-                                if (info.isNotEmpty())
-                                    (if (filters.name.isNotBlank()) info.filter {
-                                        it.packageName.contains(filters.name) || context.appNameOf(it.packageName).contains(filters.name)
-                                    } else info).let { result ->
-                                        /**
-                                         * 是否为系统应用
-                                         * @return [Boolean]
-                                         */
-                                        fun PackageInfo.isSystemApp() = applicationInfo?.let {
-                                            (it.flags and ApplicationInfo.FLAG_SYSTEM) != 0
-                                        } ?: false
-                                        when (filters.type) {
-                                            AppFiltersType.USER -> result.filter { it.isSystemApp().not() }
-                                            AppFiltersType.SYSTEM -> result.filter { it.isSystemApp() }
-                                            AppFiltersType.ALL -> result
-                                        }
-                                    }.sortedByDescending { it.lastUpdateTime }
-                                        .forEach { add(AppInfoBean(name = context.appNameOf(it.packageName), packageName = it.packageName)) }
-                                else YLog.warn("Fetched installed packages but got empty list")
+
+            var registeredSuccessfully = false
+            runCatching {
+                FrameworkTool.Host.with(context) {
+                    onRefreshFrameworkPrefsData {
+                        SystemClock.sleep(100)
+                        AppErrorsConfigData.refresh()
+                    }
+                    onOpenAppUsedFramework {
+                        systemContext?.openApp(it.first, it.second)
+                        ModuleLog.info("Opened \"${it.first}\"${it.second.takeIf { e -> e > 0 }?.let { e -> " --user $e" } ?: ""}")
+                    }
+                    onPushAppErrorInfoData { id ->
+                        val timestamp = id.toLongOrNull()
+                        val pid = id.toIntOrNull() ?: 0
+                        (if (timestamp != null && timestamp > 0L) {
+                            AppErrorsRecordData.allData.firstOrNull { e -> e.timestamp == timestamp }
+                        } else null) ?: AppErrorsRecordData.allData.firstOrNull { e -> e.pid == pid } ?: run {
+                            ModuleLog.warn("Cannot find crash application data --id $id")
+                            AppErrorsInfoBean()
+                        }
+                    }
+                    onPushAppErrorsInfoData {
+                        AppErrorsRecordData.allData.map { it.copy(stackTrace = "") }.toArrayList()
+                    }
+                    onPushAppErrorsInfoDataFull {
+                        AppErrorsRecordData.allData.toArrayList()
+                    }
+                    onRemoveAppErrorsInfoData {
+                        ModuleLog.info("Removed app errors info data for package \"${it.packageName}\"")
+                        AppErrorsRecordData.remove(it)
+                    }
+                    onClearAppErrorsInfoData {
+                        ModuleLog.info("Cleared all app errors info data, size ${AppErrorsRecordData.allData.size}")
+                        AppErrorsRecordData.clearAll()
+                    }
+                    onMutedErrorsIfUnlock {
+                        mutedErrorsIfUnlockApps.add(it)
+                        ModuleLog.info("Muted \"$it\" until unlocks")
+                    }
+                    onMutedErrorsIfRestart {
+                        mutedErrorsIfRestartApps.add(it)
+                        ModuleLog.info("Muted \"$it\" until restarts")
+                    }
+                    onPushMutedErrorsAppsData {
+                        arrayListOf<MutedErrorsAppBean>().apply {
+                            mutedErrorsIfUnlockApps.takeIf { it.isNotEmpty() }
+                                ?.forEach { add(MutedErrorsAppBean(MutedErrorsAppBean.MuteType.UNTIL_UNLOCKS, it)) }
+                            mutedErrorsIfRestartApps.takeIf { it.isNotEmpty() }
+                                ?.forEach { add(MutedErrorsAppBean(MutedErrorsAppBean.MuteType.UNTIL_REBOOTS, it)) }
+                        }
+                    }
+                    onUnmuteErrorsApp {
+                        when (it.type) {
+                            MutedErrorsAppBean.MuteType.UNTIL_UNLOCKS -> {
+                                ModuleLog.info("Unmuted if unlocks errors app \"${it.packageName}\"")
+                                mutedErrorsIfUnlockApps.remove(it.packageName)
+                            }
+                            MutedErrorsAppBean.MuteType.UNTIL_REBOOTS -> {
+                                ModuleLog.info("Unmuted if restarts errors app \"${it.packageName}\"")
+                                mutedErrorsIfRestartApps.remove(it.packageName)
                             }
                         }
-                } ?: arrayListOf()
+                    }
+                    onUnmuteAllErrorsApps {
+                        ModuleLog.info("Unmute all errors apps --unlocks ${mutedErrorsIfUnlockApps.size} --restarts ${mutedErrorsIfRestartApps.size}")
+                        mutedErrorsIfUnlockApps.clear()
+                        mutedErrorsIfRestartApps.clear()
+                    }
+                    onPushAppListData { filters ->
+                        systemContext?.let { ctx ->
+                            ctx.listOfPackages()
+                                .filter { it.packageName.let { e -> e != "android" && e != BuildConfigWrapper.APPLICATION_ID } }
+                                .let { info ->
+                                    arrayListOf<AppInfoBean>().apply {
+                                        if (info.isNotEmpty())
+                                            (if (filters.name.isNotBlank()) info.filter {
+                                                it.packageName.contains(filters.name) || ctx.appNameOf(it.packageName).contains(filters.name)
+                                            } else info).let { result ->
+                                                fun PackageInfo.isSystemApp() = applicationInfo?.let {
+                                                    (it.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+                                                } ?: false
+                                                when (filters.type) {
+                                                    AppFiltersType.USER -> result.filter { it.isSystemApp().not() }
+                                                    AppFiltersType.SYSTEM -> result.filter { it.isSystemApp() }
+                                                    AppFiltersType.ALL -> result
+                                                }
+                                            }.sortedByDescending { it.lastUpdateTime }
+                                                .forEach { add(AppInfoBean(name = ctx.appNameOf(it.packageName), packageName = it.packageName)) }
+                                        else ModuleLog.warn("Fetched installed packages but got empty list")
+                                    }
+                                }
+                        } ?: arrayListOf()
+                    }
+                }
+                registeredSuccessfully = true
+            }.onFailure {
+                ModuleLog.error("Failed to register FrameworkTool.Host", it)
+            }
+
+            if (registeredSuccessfully) {
+                isHostInitialized = true
+                ModuleLog.info("FrameworkHooker host initialized successfully")
             }
         }
     }
 
-    /**
-     * 处理 APP 进程异常信息展示
-     * @param context 当前实例
-     */
     private fun AppErrorsProcessData.handleShowAppErrorUi(context: Context) {
-        /** 当前 APP 名称 */
+        val res = getModuleResources(context)
         val appName = appInfo?.let { context.appNameOf(it.packageName).ifBlank { it.packageName } } ?: packageName
-
-        /** 当前 APP 名称 (包含用户 ID) */
-        val appNameWithUserId = if (userId != 0) "$appName (${moduleAppResources.getString(R.string.user_id, userId)})" else appName
-
-        /** 崩溃标题 */
+        val appNameWithUserId = if (userId != 0) "$appName (${res.getString(R.string.user_id, userId)})" else appName
         val errorTitle = if (isRepeatingCrash)
-            moduleAppResources.getString(R.string.aerr_repeated_title, appNameWithUserId)
-        else moduleAppResources.getString(R.string.aerr_title, appNameWithUserId)
+            res.getString(R.string.aerr_repeated_title, appNameWithUserId)
+        else res.getString(R.string.aerr_title, appNameWithUserId)
 
-        /** 使用通知推送异常信息 */
-        fun showAppErrorsWithNotify() =
+        fun showAppErrorsWithNotify() {
+            val notifyIcon = runCatching {
+                IconCompat.createWithBitmap(res.drawableOf(R.drawable.ic_notify).toBitmap())
+            }.getOrElse {
+                IconCompat.createWithResource(context, android.R.drawable.stat_notify_error)
+            }
             context.pushNotify(
                 channelId = "APPS_ERRORS",
-                channelName = moduleAppResources.getString(R.string.app_name),
+                channelName = res.getString(R.string.app_name),
                 title = errorTitle,
-                content = moduleAppResources.getString(R.string.app_errors_tip),
-                icon = IconCompat.createWithBitmap(moduleAppResources.drawableOf(R.drawable.ic_notify).toBitmap()),
+                content = res.getString(R.string.app_errors_tip),
+                icon = notifyIcon,
                 color = 0xFFFF6200.toInt(),
                 intent = AppErrorsRecordActivity.intent()
             )
+        }
 
-        /** 使用 Toast 展示异常信息 */
         fun showAppErrorsWithToast() = context.toast(errorTitle)
 
-        /** 使用对话框展示异常信息 */
-        fun showAppErrorsWithDialog() =
+        fun showAppErrorsWithDialog() {
             AppErrorsDisplayActivity.start(
                 context, AppErrorsDisplayBean(
                     pid = pid,
@@ -376,16 +439,16 @@ object FrameworkHooker : YukiBaseHooker() {
                     isShowCloseAppButton = isActualApp
                 )
             )
-        /** 判断是否为已忽略的 APP */
+        }
+
         if (mutedErrorsIfUnlockApps.contains(packageName) || mutedErrorsIfRestartApps.contains(packageName)) return
-        /** 判断是否为后台进程 */
         if ((isBackgroundProcess || context.isAppCanOpened(packageName).not()) && ConfigData.isEnableOnlyShowErrorsInFront) return
-        /** 判断是否为主进程 */
         if (isMainProcess.not() && ConfigData.isEnableOnlyShowErrorsInMain) return
+
         when {
             packageName == BuildConfigWrapper.APPLICATION_ID -> {
                 context.toast(msg = "AppErrorsTracking has crashed, please see the log in console")
-                YLog.error("AppErrorsTracking has crashed itself, please see the Android Runtime Exception in console")
+                ModuleLog.error("AppErrorsTracking has crashed itself, please see the Android Runtime Exception in console")
             }
             ConfigData.isEnableAppConfigTemplate -> when {
                 AppErrorsConfigData.isAppShowingType(AppErrorsConfigType.GLOBAL, packageName) -> when {
@@ -401,117 +464,196 @@ object FrameworkHooker : YukiBaseHooker() {
             }
             else -> showAppErrorsWithDialog()
         }
-        /** 打印错误日志 */
-        if (isActualApp) YLog.error(
+
+        if (isActualApp) ModuleLog.error(
             msg = "Application \"$packageName\" ${if (isRepeatingCrash) "keeps stopping" else "has stopped"}" +
                 (if (packageName != processName) " --process \"$processName\"" else "") +
                 "${if (userId != 0) " --user $userId" else ""} --pid $pid"
-        ) else YLog.error("Process \"$processName\" ${if (isRepeatingCrash) "keeps stopping" else "has stopped"} --pid $pid")
+        ) else ModuleLog.error("Process \"$processName\" ${if (isRepeatingCrash) "keeps stopping" else "has stopped"} --pid $pid")
     }
 
-    /**
-     * 处理 APP 进程异常数据
-     * @param context 当前实例
-     * @param info 系统错误报告数据实例
-     */
     private fun AppErrorsProcessData.handleAppErrorsInfo(context: Context, info: ApplicationErrorReport.CrashInfo?) {
         AppErrorsRecordData.add(AppErrorsInfoBean.clone(context, pid, userId, appInfo?.packageName, info))
-        YLog.info("Received crash application data${if (userId != 0) " --user $userId" else ""} --pid $pid")
+        ModuleLog.info("Received crash application data${if (userId != 0) " --user $userId" else ""} --pid $pid")
     }
 
-    override fun onHook() {
-        /** 注册生命周期 */
-        registerLifecycle()
-        /** 干掉原生错误对话框 - 如果有 */
-        ErrorDialogControllerClass?.resolve()?.optional(silent = true)?.apply {
-            val hasCrashDialogs = firstMethodOrNull {
-                name = "hasCrashDialogs"
-                emptyParameters()
-            }?.hook()?.replaceToTrue() != null
-            if (!hasCrashDialogs)
-                firstConstructorOrNull {
-                    parameterCount = 1
-                }?.hook()?.after {
-                    firstFieldOrNull { name = "mCrashDialogs" }?.of(instance)?.set(emptyList<Any>())
-                }
-            firstMethodOrNull {
-                name = "showCrashDialogs"
-                parameterCount = 1
-            }?.hook()?.intercept()
-        }
-        /** 干掉原生错误对话框 - API 30 以下 */
-        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q) {
-            ActivityTaskManagerService_LocalServiceClass?.resolve()?.optional()?.firstMethodOrNull {
-                name = "canShowErrorDialogs"
-                emptyParameters()
-            }?.hook()?.replaceToFalse()
-            ActivityManagerServiceClass?.resolve()?.optional()?.firstMethodOrNull {
-                name = "canShowErrorDialogs"
-                emptyParameters()
-            }?.hook()?.replaceToFalse()
-        }
-        /** 干掉原生错误对话框 - 如果上述方法全部失效则直接结束对话框 */
-        AppErrorDialogClass.resolve().optional(silent = true).apply {
-            firstMethodOrNull {
-                name = "onCreate"
-                parameters(Bundle::class)
-            }?.hook()?.after { instance<Dialog>().cancel() }
-            firstMethodOrNull {
-                name = "onStart"
-                emptyParameters()
-            }?.hook()?.after { instance<Dialog>().cancel() }
-        }
-        /** 注入自定义错误对话框 */
-        AppErrorsClass.resolve().optional().apply {
-            when {
-                Build.VERSION.SDK_INT > Build.VERSION_CODES.R -> {
-                    firstMethodOrNull {
-                        name = "handleAppCrashLSPB"
-                        parameterCount = 6
-                    }?.hook()?.after {
-                        /** 如果为用户终止则不展示异常 */
-                        if (args(index = 1).string() == "user-terminated") return@after
-                        /** 当前实例 */
-                        val context = appContext ?: firstFieldOrNull { name = "mContext" }?.of(instance)?.get<Context>() ?: return@after
+    fun init(module: XposedModule, classLoader: ClassLoader) {
+        this.module = module
 
-                        /** 当前进程信息 */
-                        val proc = args().first().any() ?: return@after YLog.warn("Received but got null ProcessRecord (Show UI failed)")
+        val appErrorsClass = findClass("com.android.server.am.AppErrors", classLoader)
+        val appErrorDialogClass = findClass("com.android.server.am.AppErrorDialog", classLoader)
+        val appErrorDialogDataClass = findClass("com.android.server.am.AppErrorDialog\$Data", classLoader)
+        val activityManagerServiceClass = findClass("com.android.server.am.ActivityManagerService", classLoader)
+        val activityTaskManagerServiceLocalServiceClass = findClass("com.android.server.wm.ActivityTaskManagerService\$LocalService", classLoader)
+        val errorDialogControllerClass = findClass("com.android.server.am.ProcessRecord\$ErrorDialogController", classLoader)
+            ?: findClass("com.android.server.am.ErrorDialogController", classLoader)
 
-                        /** 当前错误数据 */
-                        val resultData = args().last().any()
-                        /** 创建 APP 进程异常数据类 */
-                        AppErrorsProcessData(instance, proc, resultData).handleShowAppErrorUi(context)
+        // 尝试提前从 ActivityThread 获取 Context
+        runCatching {
+            val ctx = getSystemContextFromActivityThread()
+            if (ctx != null) ensureInitializedWithContext(ctx)
+        }
+
+        // 监听 AMS.systemReady
+        activityManagerServiceClass?.declaredMethods?.filter { it.name == "systemReady" }?.forEach { method ->
+            runCatching {
+                module.hook(method).intercept { chain ->
+                    val res = chain.proceed()
+                    runCatching {
+                        val ctx = getContextFromInstance(chain.thisObject) ?: getSystemContextFromActivityThread()
+                        if (ctx != null) ensureInitializedWithContext(ctx)
                     }
+                    res
                 }
-                else -> {
-                    firstMethodOrNull {
-                        name = "handleShowAppErrorUi"
-                        parameters(Message::class)
-                    }?.hook()?.after {
-                        /** 当前实例 */
-                        val context = appContext ?: firstFieldOrNull { name = "mContext" }?.of(instance)?.get<Context>() ?: return@after
+            }
+        }
 
-                        /** 当前错误数据 */
-                        val resultData = args().first().cast<Message>()?.obj
+        // 监听 AppErrors 构造以获得 Context
+        appErrorsClass?.declaredConstructors?.forEach { ctor ->
+            runCatching {
+                module.hook(ctor).intercept { chain ->
+                    val res = chain.proceed()
+                    val ctx = chain.args.firstOrNull { it is Context } as? Context
+                        ?: getContextFromInstance(chain.thisObject)
+                        ?: getSystemContextFromActivityThread()
+                    if (ctx != null) ensureInitializedWithContext(ctx)
+                    res
+                }
+            }
+        }
 
-                        /** 当前进程信息 */
-                        val proc = AppErrorDialog_DataClass.resolve().optional().firstFieldOrNull { name = "proc" }?.of(resultData)?.get()
-                        /** 创建 APP 进程异常数据类 */
-                        AppErrorsProcessData(instance, proc, resultData).handleShowAppErrorUi(context)
+        // 干掉原生错误对话框 - ErrorDialogController
+        errorDialogControllerClass?.let { edcClass ->
+            val hasCrashDialogsMethod = findMethod(edcClass, "hasCrashDialogs")
+            if (hasCrashDialogsMethod != null) {
+                runCatching {
+                    module.hook(hasCrashDialogsMethod).intercept { true }
+                }
+            } else {
+                edcClass.declaredConstructors.firstOrNull { it.parameterTypes.size == 1 }?.let { ctor ->
+                    runCatching {
+                        module.hook(ctor).intercept { chain ->
+                            val result = chain.proceed()
+                            runCatching {
+                                val field = findField(edcClass, "mCrashDialogs")
+                                field?.set(chain.thisObject, emptyList<Any>())
+                            }
+                            result
+                        }
                     }
                 }
             }
-            firstMethodOrNull {
-                name = "handleAppCrashInActivityController"
-                returnType = Boolean::class
-            }?.hook()?.after {
-                /** 当前实例 */
-                val context = appContext ?: firstFieldOrNull { name = "mContext" }?.of(instance)?.get<Context>() ?: return@after
+            edcClass.declaredMethods.firstOrNull { it.name == "showCrashDialogs" && it.parameterTypes.size == 1 }?.let { method ->
+                runCatching {
+                    module.hook(method).intercept { null }
+                }
+            }
+        }
 
-                /** 当前进程信息 */
-                val proc = args().first().any() ?: return@after YLog.warn("Received but got null ProcessRecord")
-                /** 创建 APP 进程异常数据类 */
-                AppErrorsProcessData(instance, proc).handleAppErrorsInfo(context, args(index = 1).cast())
+        // 干掉原生错误对话框 - API 30 以下
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q) {
+            findMethod(activityTaskManagerServiceLocalServiceClass, "canShowErrorDialogs")?.let { m ->
+                runCatching { module.hook(m).intercept { false } }
+            }
+            findMethod(activityManagerServiceClass, "canShowErrorDialogs")?.let { m ->
+                runCatching { module.hook(m).intercept { false } }
+            }
+        }
+
+        // 干掉原生错误对话框 - 如果上述方法失效则直接取消对话框
+        appErrorDialogClass?.let { dialogClass ->
+            findMethod(dialogClass, "onCreate", Bundle::class.java)?.let { m ->
+                runCatching {
+                    module.hook(m).intercept { chain ->
+                        val res = chain.proceed()
+                        (chain.thisObject as? Dialog)?.cancel()
+                        res
+                    }
+                }
+            }
+            findMethod(dialogClass, "onStart")?.let { m ->
+                runCatching {
+                    module.hook(m).intercept { chain ->
+                        val res = chain.proceed()
+                        (chain.thisObject as? Dialog)?.cancel()
+                        res
+                    }
+                }
+            }
+        }
+
+        // 注入自定义错误处理
+        appErrorsClass?.let { aeClass ->
+            if (Build.VERSION.SDK_INT > Build.VERSION_CODES.R) {
+                val method = aeClass.declaredMethods.firstOrNull { it.name == "handleAppCrashLSPB" && it.parameterTypes.size == 6 }
+                method?.let {
+                    runCatching {
+                        module.hook(it).intercept { chain ->
+                            val res = chain.proceed()
+                            val args = chain.args
+                            if (args.getOrNull(1) as? String == "user-terminated") return@intercept res
+                            val context = systemContext ?: getContextFromInstance(chain.thisObject) ?: getSystemContextFromActivityThread()
+                            if (context != null) {
+                                ensureInitializedWithContext(context)
+                                val proc = args.firstOrNull()
+                                if (proc == null) {
+                                    ModuleLog.warn("Received but got null ProcessRecord (Show UI failed)")
+                                } else {
+                                    val resultData = args.lastOrNull()
+                                    AppErrorsProcessData(chain.thisObject, proc, resultData).handleShowAppErrorUi(context)
+                                }
+                            }
+                            res
+                        }
+                    }
+                }
+            } else {
+                val method = aeClass.declaredMethods.firstOrNull {
+                    it.name == "handleShowAppErrorUi" && it.parameterTypes.size == 1 && it.parameterTypes[0] == Message::class.java
+                }
+                method?.let {
+                    runCatching {
+                        module.hook(it).intercept { chain ->
+                            val res = chain.proceed()
+                            val msg = chain.args.firstOrNull() as? Message
+                            val resultData = msg?.obj
+                            val context = systemContext ?: getContextFromInstance(chain.thisObject) ?: getSystemContextFromActivityThread()
+                            if (context != null && resultData != null) {
+                                ensureInitializedWithContext(context)
+                                val procField = findField(resultData.javaClass, "proc")
+                                    ?: appErrorDialogDataClass?.let { c -> findField(c, "proc") }
+                                val proc = procField?.get(resultData)
+                                if (proc != null) {
+                                    AppErrorsProcessData(chain.thisObject, proc, resultData).handleShowAppErrorUi(context)
+                                }
+                            }
+                            res
+                        }
+                    }
+                }
+            }
+
+            val handleCrashInController = aeClass.declaredMethods.firstOrNull {
+                it.name == "handleAppCrashInActivityController" && it.returnType == java.lang.Boolean.TYPE
+            }
+            handleCrashInController?.let {
+                runCatching {
+                    module.hook(it).intercept { chain ->
+                        val res = chain.proceed()
+                        val context = systemContext ?: getContextFromInstance(chain.thisObject) ?: getSystemContextFromActivityThread()
+                        if (context != null) {
+                            ensureInitializedWithContext(context)
+                            val proc = chain.args.firstOrNull()
+                            if (proc == null) {
+                                ModuleLog.warn("Received but got null ProcessRecord")
+                            } else {
+                                val crashInfo = chain.args.getOrNull(1) as? ApplicationErrorReport.CrashInfo
+                                AppErrorsProcessData(chain.thisObject, proc).handleAppErrorsInfo(context, crashInfo)
+                            }
+                        }
+                        res
+                    }
+                }
             }
         }
     }

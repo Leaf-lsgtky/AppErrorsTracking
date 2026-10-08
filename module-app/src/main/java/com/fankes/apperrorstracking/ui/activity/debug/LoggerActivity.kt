@@ -30,7 +30,6 @@ import android.view.View
 import android.widget.AdapterView
 import androidx.core.view.isVisible
 import com.fankes.apperrorstracking.R
-import com.fankes.apperrorstracking.const.PackageName
 import com.fankes.apperrorstracking.databinding.ActivitiyLoggerBinding
 import com.fankes.apperrorstracking.databinding.AdapterLoggerBinding
 import com.fankes.apperrorstracking.databinding.DiaLoggerFilterBinding
@@ -40,9 +39,8 @@ import com.fankes.apperrorstracking.utils.factory.copyToClipboard
 import com.fankes.apperrorstracking.utils.factory.showDialog
 import com.fankes.apperrorstracking.utils.factory.toUtcTime
 import com.fankes.apperrorstracking.utils.factory.toast
-import com.highcapable.yukihookapi.hook.factory.dataChannel
-import com.highcapable.yukihookapi.hook.log.YLog
-import com.highcapable.yukihookapi.hook.log.data.YLogData
+import com.fankes.apperrorstracking.utils.tool.FrameworkTool
+import com.fankes.apperrorstracking.utils.tool.ModuleLog
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
 import java.text.SimpleDateFormat
@@ -63,7 +61,7 @@ class LoggerActivity : BaseActivity<ActivitiyLoggerBinding>() {
     private var filters = arrayListOf("D", "I", "W", "E")
 
     /** 全部的调试日志数据 */
-    private val listData = mutableListOf<YLogData>()
+    private val listData = mutableListOf<ModuleLog.LogItem>()
 
     override fun onCreate() {
         binding.titleBackIcon.setOnClickListener { finish() }
@@ -126,7 +124,7 @@ class LoggerActivity : BaseActivity<ActivitiyLoggerBinding>() {
 
     /** 更新列表数据 */
     private fun refreshData() {
-        dataChannel(PackageName.SYSTEM_FRAMEWORK).obtainLoggerInMemoryData { logData ->
+        FrameworkTool.fetchLoggerData(this) { logData ->
             listData.clear()
             logData.takeIf { e -> e.isNotEmpty() }?.reversed()?.filter { filters.any { e -> it.priority == e } }?.forEach { e -> listData.add(e) }
             onChanged?.invoke()
@@ -176,7 +174,7 @@ class LoggerActivity : BaseActivity<ActivitiyLoggerBinding>() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == WRITE_REQUEST_CODE && resultCode == RESULT_OK) runCatching {
             data?.data?.let {
-                contentResolver?.openOutputStream(it)?.apply { write(YLog.contents(listData).toByteArray()) }?.close()
+                contentResolver?.openOutputStream(it)?.apply { write(ModuleLog.contents(listData).toByteArray()) }?.close()
                 toast(getString(R.string.export_all_logs_success))
             } ?: toast(getString(R.string.export_all_logs_fail))
         }.onFailure { toast(getString(R.string.export_all_logs_fail)) }

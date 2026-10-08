@@ -31,7 +31,7 @@ import com.fankes.apperrorstracking.utils.factory.appVersionCodeOf
 import com.fankes.apperrorstracking.utils.factory.appVersionNameOf
 import com.fankes.apperrorstracking.utils.factory.toEntityOrNull
 import com.fankes.apperrorstracking.utils.factory.toJsonOrNull
-import com.highcapable.yukihookapi.hook.log.YLog
+import com.fankes.apperrorstracking.utils.tool.ModuleLog
 import java.io.File
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -68,7 +68,10 @@ object AppErrorsRecordData {
     fun init(context: Context) {
         this.context = context
         initializeDataDirectory()
-        allData = readAllDataFromFiles()
+        allData = runCatching { readAllDataFromFiles() }.getOrElse {
+            ModuleLog.error("Failed to read all data from files", it)
+            CopyOnWriteArrayList()
+        }
     }
 
     /** 初始化异常记录数据目录 */
@@ -76,7 +79,7 @@ object AppErrorsRecordData {
         runCatching {
             errorsInfoDataFolder.also { if (it.exists().not() || it.isFile) it.apply { delete(); mkdirs() } }
         }.onFailure {
-            YLog.error("Can't create directory \"$FOLDER_PATH\", there will be problems with the app errors records function", it)
+            ModuleLog.error("Can't create directory \"$FOLDER_PATH\", there will be problems with the app errors records function", it)
         }
     }
 
@@ -93,7 +96,7 @@ object AppErrorsRecordData {
                     e.cpuAbi = it.appCpuAbiOf(e.packageName)
                     e.versionName = it.appVersionNameOf(e.packageName).ifBlank { "unknown" }
                     e.versionCode = it.appVersionCodeOf(e.packageName)
-                    e.toJsonOrNull()?.also { json -> File(errorsInfoDataFolder.absolutePath, e.jsonFileName).writeText(json) }
+                    e.toJsonOrNull()?.also { json -> runCatching { File(errorsInfoDataFolder.absolutePath, e.jsonFileName).writeText(json) } }
                 }.let { result ->
                     if (result != null) {
                         Settings.Secure.putString(it.contentResolver, keyName, "")
@@ -103,12 +106,32 @@ object AppErrorsRecordData {
         }.getOrNull()
     }
 
+    /** 最大保存的异常记录数 */
+    private const val MAX_RECORDS = 150
+
     /**
      * 从文件获取全部异常记录数据
      * @return [ArrayList]<[AppErrorsInfoBean]>
      */
     private fun readAllDataFromFiles() = copyOldDataFromResolverString() ?: CopyOnWriteArrayList<AppErrorsInfoBean>().apply {
-        errorsInfoDataFiles.takeIf { it.isNotEmpty() }?.forEach { it.readText().toEntityOrNull<AppErrorsInfoBean>()?.let { e -> add(e) } }
+        runCatching {
+            val files = errorsInfoDataFiles
+            if (files.isNotEmpty()) {
+                files.take(MAX_RECORDS).forEach { file ->
+                    runCatching {
+                        file.readText().toEntityOrNull<AppErrorsInfoBean>()?.let { e -> add(e) }
+                    }.onFailure {
+                        ModuleLog.warn("Failed to parse record file ${file.name}: ${it.message}")
+                    }
+                }
+                if (files.size > MAX_RECORDS) {
+                    files.drop(MAX_RECORDS).forEach { file ->
+                        runCatching { file.delete() }
+                    }
+                    ModuleLog.info("Pruned ${files.size - MAX_RECORDS} older record files")
+                }
+            }
+        }
     }
 
     /**
@@ -118,6 +141,10 @@ object AppErrorsRecordData {
     fun add(bean: AppErrorsInfoBean) {
         allData.add(0, bean)
         bean.toJsonOrNull()?.runCatching { File(errorsInfoDataFolder.absolutePath, bean.jsonFileName).writeText(this) }
+        while (allData.size > MAX_RECORDS) {
+            val removed = allData.removeAt(allData.lastIndex)
+            runCatching { File(errorsInfoDataFolder.absolutePath, removed.jsonFileName).delete() }
+        }
     }
 
     /**

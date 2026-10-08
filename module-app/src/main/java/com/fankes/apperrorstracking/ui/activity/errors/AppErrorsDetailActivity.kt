@@ -45,8 +45,9 @@ import com.fankes.apperrorstracking.utils.factory.navigate
 import com.fankes.apperrorstracking.utils.factory.openSelfSetting
 import com.fankes.apperrorstracking.utils.factory.showDialog
 import com.fankes.apperrorstracking.utils.factory.toast
+import com.fankes.apperrorstracking.utils.tool.FrameworkTool
+import com.fankes.apperrorstracking.utils.tool.ModuleLog
 import com.fankes.apperrorstracking.utils.tool.StackTraceShareHelper
-import com.highcapable.yukihookapi.hook.log.loggerE
 import java.io.File
 
 class AppErrorsDetailActivity : BaseActivity<ActivityAppErrorsDetailBinding>() {
@@ -120,7 +121,7 @@ class AppErrorsDetailActivity : BaseActivity<ActivityAppErrorsDetailBinding>() {
         }
         binding.appInfoItem.setOnClickListener { openSelfSetting(appErrorsInfo.packageName) }
         binding.printIcon.setOnClickListener {
-            loggerE(msg = appErrorsInfo.stackTrace)
+            ModuleLog.error(appErrorsInfo.stackTrace)
             toast(getString(R.string.print_to_logcat_success))
         }
         binding.copyIcon.setOnClickListener {
@@ -151,7 +152,9 @@ class AppErrorsDetailActivity : BaseActivity<ActivityAppErrorsDetailBinding>() {
                             val file = File.createTempFile("app_errors_stacktrace_", ".log", cacheDir)
                             file.deleteOnExit()
                             file.writeText(content)
-                            putExtra(Intent.EXTRA_STREAM, FileProvider.getUriForFile(this@AppErrorsDetailActivity, "$packageName.provider", file))
+                            val uri = FileProvider.getUriForFile(this@AppErrorsDetailActivity, "$packageName.provider", file)
+                            putExtra(Intent.EXTRA_STREAM, uri)
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                         }.onFailure {
                             toast(msg = "Create temp file failed")
                         }
@@ -181,6 +184,33 @@ class AppErrorsDetailActivity : BaseActivity<ActivityAppErrorsDetailBinding>() {
         binding.errorRecordTimeText.text = appErrorsInfo.dateTime
         binding.errorStackTraceMovableText.text = appErrorsInfo.stackTrace
         binding.errorStackTraceFixedText.text = appErrorsInfo.stackTrace
+        if (appErrorsInfo.stackTrace.isEmpty()) {
+            FrameworkTool.fetchAppErrorInfoData(this, appErrorsInfo.timestamp) { fullBean ->
+                if (isFinishing || isDestroyed) return@fetchAppErrorInfoData
+                if (!fullBean.isEmpty) {
+                    appErrorsInfo.stackTrace = fullBean.stackTrace
+                    appErrorsInfo.throwFileName = fullBean.throwFileName
+                    appErrorsInfo.throwClassName = fullBean.throwClassName
+                    appErrorsInfo.throwMethodName = fullBean.throwMethodName
+                    appErrorsInfo.throwLineNumber = fullBean.throwLineNumber
+                    appErrorsInfo.cpuAbi = fullBean.cpuAbi
+                    appErrorsInfo.versionName = fullBean.versionName
+                    appErrorsInfo.versionCode = fullBean.versionCode
+                    appErrorsInfo.targetSdk = fullBean.targetSdk
+                    appErrorsInfo.minSdk = fullBean.minSdk
+                    binding.errorStackTraceMovableText.text = fullBean.stackTrace
+                    binding.errorStackTraceFixedText.text = fullBean.stackTrace
+                    binding.errorFileNameText.text = fullBean.throwFileName
+                    binding.errorThrowClassText.text = fullBean.throwClassName
+                    binding.errorThrowMethodText.text = fullBean.throwMethodName
+                    binding.errorLineNumberText.text = fullBean.throwLineNumber.toString()
+                    binding.appCpuAbiText.text = fullBean.cpuAbi.ifBlank { getString(R.string.no_cpu_abi) }
+                    binding.appTargetSdkText.text = getString(R.string.app_target_sdk, fullBean.targetSdk)
+                    binding.appMinSdkText.text = getString(R.string.app_min_sdk, fullBean.minSdk)
+                    binding.appVersionText.text = fullBean.versionBrand
+                }
+            }
+        }
         binding.appPanelScrollView.setOnScrollChangeListener { _, _, y, _, _ ->
             binding.detailTitleText.text = if (y >= 30.dp(context = this@AppErrorsDetailActivity))
                 appNameOf(appErrorsInfo.packageName).ifBlank { appErrorsInfo.packageName }

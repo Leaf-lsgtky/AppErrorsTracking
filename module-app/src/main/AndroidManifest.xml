@@ -20,6 +20,7 @@
     <application
         android:name=".application.AppErrorsApplication"
         android:allowBackup="true"
+        android:description="@string/xposed_desc"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:localeConfig="@xml/locales_config"
@@ -27,6 +28,11 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.AppErrorsTracking"
         tools:targetApi="tiramisu">
+
+        <provider
+            android:name="io.github.libxposed.service.XposedProvider"
+            android:authorities="${applicationId}.XposedService"
+            android:exported="true" />
 
         <meta-data
             android:name="xposedmodule"
@@ -36,10 +42,7 @@
             android:value="@string/xposed_desc" />
         <meta-data
             android:name="xposedminversion"
-            android:value="89" />
-        <meta-data
-            android:name="xposedsharedprefs"
-            android:value="true" />
+            android:value="101" />
         <meta-data
             android:name="xposedscope"
             android:resource="@array/module_scope" />

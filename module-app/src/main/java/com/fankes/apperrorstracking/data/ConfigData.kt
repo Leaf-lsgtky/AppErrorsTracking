@@ -24,16 +24,18 @@
 package com.fankes.apperrorstracking.data
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.os.Build
-import com.highcapable.yukihookapi.hook.factory.prefs
-import com.highcapable.yukihookapi.hook.log.YLog
-import com.highcapable.yukihookapi.hook.param.PackageParam
-import com.highcapable.yukihookapi.hook.xposed.prefs.data.PrefsData
+import com.fankes.apperrorstracking.application.AppErrorsApplication
+import com.fankes.apperrorstracking.utils.tool.ModuleLog
 
 /**
  * 全局配置存储控制类
  */
 object ConfigData {
+
+    const val PREFS_GROUP = "default"
+    private const val LOCAL_PREFS_NAME = "app_errors_config"
 
     /** 显示开发者提示 */
     val SHOW_DEVELOPER_NOTICE = PrefsData("_show_developer_notice", true)
@@ -62,18 +64,23 @@ object ConfigData {
     /** 分享时使用文件 */
     val SHARE_WITH_FILE = PrefsData("_share_with_file", false)
 
-    /** 当前实例 - [Context] or [PackageParam] */
-    private var instance: Any? = null
+    /** 当前存储实例 */
+    @Volatile
+    private var sharedPrefs: SharedPreferences? = null
 
     /**
      * 初始化存储控制类
-     * @param instance 实例 - 只能是 [Context] or [PackageParam]
-     * @throws IllegalStateException 如果类型错误
+     * @param instance 实例 - 可以是 [Context] 或 [SharedPreferences]
      */
     fun init(instance: Any) {
         when (instance) {
-            is Context, is PackageParam -> this.instance = instance
-            else -> error("Unknown type for init ConfigData")
+            is Context -> {
+                sharedPrefs = instance.getSharedPreferences(LOCAL_PREFS_NAME, Context.MODE_PRIVATE)
+            }
+            is SharedPreferences -> {
+                sharedPrefs = instance
+            }
+            else -> ModuleLog.warn("Unknown instance type for ConfigData.init: ${instance::class.java.name}")
         }
         AppErrorsConfigData.refresh()
     }
@@ -83,10 +90,8 @@ object ConfigData {
      * @param key 键值名称
      * @return [Set]<[String]>
      */
-    internal fun getStringSet(key: String) = when (instance) {
-        is Context -> (instance as Context).prefs().getStringSet(key, setOf())
-        is PackageParam -> (instance as PackageParam).prefs.getStringSet(key, setOf())
-        else -> error("Unknown type for get prefs data")
+    internal fun getStringSet(key: String): Set<String> {
+        return sharedPrefs?.getStringSet(key, emptySet()) ?: emptySet()
     }
 
     /**
@@ -95,10 +100,9 @@ object ConfigData {
      * @param value 键值内容
      */
     internal fun putStringSet(key: String, value: Set<String>) {
-        when (instance) {
-            is Context -> (instance as Context).prefs().edit { putStringSet(key, value) }
-            is PackageParam -> YLog.warn("Not support for this method")
-            else -> error("Unknown type for put prefs data")
+        sharedPrefs?.edit()?.putStringSet(key, value)?.apply()
+        runCatching {
+            AppErrorsApplication.xposedService?.getRemotePreferences(PREFS_GROUP)?.edit()?.putStringSet(key, value)?.apply()
         }
     }
 
@@ -107,10 +111,8 @@ object ConfigData {
      * @param data 键值数据模板
      * @return [Int]
      */
-    internal fun getInt(data: PrefsData<Int>) = when (instance) {
-        is Context -> (instance as Context).prefs().get(data)
-        is PackageParam -> (instance as PackageParam).prefs.get(data)
-        else -> error("Unknown type for get prefs data")
+    internal fun getInt(data: PrefsData<Int>): Int {
+        return sharedPrefs?.getInt(data.key, data.value) ?: data.value
     }
 
     /**
@@ -119,10 +121,9 @@ object ConfigData {
      * @param value 键值内容
      */
     internal fun putInt(data: PrefsData<Int>, value: Int) {
-        when (instance) {
-            is Context -> (instance as Context).prefs().edit { put(data, value) }
-            is PackageParam -> YLog.warn("Not support for this method")
-            else -> error("Unknown type for put prefs data")
+        sharedPrefs?.edit()?.putInt(data.key, value)?.apply()
+        runCatching {
+            AppErrorsApplication.xposedService?.getRemotePreferences(PREFS_GROUP)?.edit()?.putInt(data.key, value)?.apply()
         }
     }
 
@@ -131,10 +132,8 @@ object ConfigData {
      * @param data 键值数据模板
      * @return [Boolean]
      */
-    internal fun getBoolean(data: PrefsData<Boolean>) = when (instance) {
-        is Context -> (instance as Context).prefs().get(data)
-        is PackageParam -> (instance as PackageParam).prefs.get(data)
-        else -> error("Unknown type for get prefs data")
+    internal fun getBoolean(data: PrefsData<Boolean>): Boolean {
+        return sharedPrefs?.getBoolean(data.key, data.value) ?: data.value
     }
 
     /**
@@ -143,10 +142,9 @@ object ConfigData {
      * @param value 键值内容
      */
     internal fun putBoolean(data: PrefsData<Boolean>, value: Boolean) {
-        when (instance) {
-            is Context -> (instance as Context).prefs().edit { put(data, value) }
-            is PackageParam -> YLog.warn("Not support for this method")
-            else -> error("Unknown type for put prefs data")
+        sharedPrefs?.edit()?.putBoolean(data.key, value)?.apply()
+        runCatching {
+            AppErrorsApplication.xposedService?.getRemotePreferences(PREFS_GROUP)?.edit()?.putBoolean(data.key, value)?.apply()
         }
     }
 

@@ -139,36 +139,47 @@ class AppErrorsRecordActivity : BaseActivity<ActivityAppErrorsRecordBinding>() {
             bindAdapter {
                 onBindDatas { listData }
                 onBindViews<AdapterAppErrorsRecordBinding> { binding, position ->
-                    listData[position].also { bean ->
-                        binding.appIcon.setImageDrawable(appIconOf(bean.packageName))
-                        binding.appNameText.text = appNameOf(bean.packageName).ifBlank { bean.packageName }
-                        binding.appUserIdText.isVisible = bean.userId > 0
-                        binding.appUserIdText.text = getString(R.string.user_id, bean.userId)
-                        binding.errorsTimeText.text = bean.crossTime(this@AppErrorsRecordActivity)
-                        binding.errorTypeIcon.setImageResource(if (bean.isNativeCrash) R.drawable.ic_cpp else R.drawable.ic_java)
-                        binding.errorTypeText.text = if (bean.isNativeCrash) "Native crash" else bean.exceptionClassName.simpleThwName()
-                        binding.errorMsgText.text = bean.exceptionMessage
+                    runCatching {
+                        listData.getOrNull(position)?.also { bean ->
+                            binding.appIcon.setImageDrawable(appIconOf(bean.packageName))
+                            binding.appNameText.text = appNameOf(bean.packageName).ifBlank { bean.packageName }
+                            binding.appUserIdText.isVisible = bean.userId > 0
+                            binding.appUserIdText.text = getString(R.string.user_id, bean.userId)
+                            binding.errorsTimeText.text = bean.crossTime(this@AppErrorsRecordActivity)
+                            binding.errorTypeIcon.setImageResource(if (bean.isNativeCrash) R.drawable.ic_cpp else R.drawable.ic_java)
+                            binding.errorTypeText.text = if (bean.isNativeCrash) "Native crash" else bean.exceptionClassName.simpleThwName()
+                            binding.errorMsgText.text = bean.exceptionMessage
+                        }
+                    }.onFailure { e ->
+                        android.util.Log.e("AppErrorsCrash", "Error in onBindViews position $position", e)
                     }
                 }
             }.apply { onChanged = { notifyDataSetChanged() } }
             registerForContextMenu(this)
-            setOnItemClickListener { _, _, p, _ -> AppErrorsDetailActivity.start(context, listData[p]) }
+            setOnItemClickListener { _, _, p, _ ->
+                listData.getOrNull(p)?.let { AppErrorsDetailActivity.start(context, it) }
+            }
         }
     }
 
     /** 更新列表数据 */
     private fun refreshData() {
         FrameworkTool.fetchAppErrorsInfoData(context = this) {
-            binding.titleCountText.text = getString(R.string.record_count, it.size)
-            binding.listProgressView.isVisible = false
-            binding.appErrorSisIcon.isVisible = it.size >= 5
-            binding.clearAllIcon.isVisible = it.isNotEmpty()
-            binding.exportAllIcon.isVisible = it.isNotEmpty()
-            binding.listView.isVisible = it.isNotEmpty()
-            binding.listNoDataView.isVisible = it.isEmpty()
-            listData.clear()
-            it.takeIf { e -> e.isNotEmpty() }?.forEach { e -> listData.add(e) }
-            onChanged?.invoke()
+            if (isFinishing || isDestroyed) return@fetchAppErrorsInfoData
+            runCatching {
+                binding.titleCountText.text = getString(R.string.record_count, it.size)
+                binding.listProgressView.isVisible = false
+                binding.appErrorSisIcon.isVisible = it.size >= 5
+                binding.clearAllIcon.isVisible = it.isNotEmpty()
+                binding.exportAllIcon.isVisible = it.isNotEmpty()
+                binding.listView.isVisible = it.isNotEmpty()
+                binding.listNoDataView.isVisible = it.isEmpty()
+                listData.clear()
+                it.takeIf { e -> e.isNotEmpty() }?.forEach { e -> listData.add(e) }
+                onChanged?.invoke()
+            }.onFailure { e ->
+                android.util.Log.e("AppErrorsCrash", "Error in refreshData callback", e)
+            }
         }
     }
 
@@ -176,22 +187,34 @@ class AppErrorsRecordActivity : BaseActivity<ActivityAppErrorsRecordBinding>() {
     private fun exportAll() {
         clearAllExportTemp()
         StackTraceShareHelper.showChoose(context = this, getString(R.string.export_all)) { sDeviceBrand, sDeviceModel, sDisplay, sPackageName ->
-            ("${cacheDir.absolutePath}/temp").also { path ->
-                File(path).mkdirs()
-                listData.takeIf { it.isNotEmpty() }?.forEachIndexed { index, bean ->
-                    val packageName = if (sPackageName) bean.packageName else "anonymous_$index"
-                    File("$path/${packageName}_${bean.utcTime}.log")
-                        .writeText(bean.stackOutputFileContent(sDeviceBrand, sDeviceModel, sDisplay, sPackageName))
+            showDialog {
+                title = getString(R.string.notice)
+                progressContent = getString(R.string.generating_statistics)
+                noCancelable()
+                FrameworkTool.fetchAppErrorsInfoDataFull(context) { fullList ->
+                    newThread {
+                        ("${cacheDir.absolutePath}/temp").also { path ->
+                            File(path).mkdirs()
+                            fullList.takeIf { it.isNotEmpty() }?.forEachIndexed { index, bean ->
+                                val packageName = if (sPackageName) bean.packageName else "anonymous_$index"
+                                File("$path/${packageName}_${bean.utcTime}.log")
+                                    .writeText(bean.stackOutputFileContent(sDeviceBrand, sDeviceModel, sDisplay, sPackageName))
+                            }
+                            outPutFilePath = "${cacheDir.absolutePath}/temp_${System.currentTimeMillis()}.zip"
+                            ZipFileTool.zipMultiFile(path, outPutFilePath)
+                            runOnUiThread {
+                                cancel()
+                                runCatching {
+                                    startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                                        addCategory(Intent.CATEGORY_OPENABLE)
+                                        type = "*/application"
+                                        putExtra(Intent.EXTRA_TITLE, "app_errors_info_${System.currentTimeMillis().toUtcTime()}.zip")
+                                    }, WRITE_REQUEST_CODE)
+                                }.onFailure { toast(msg = "Start Android SAF failed") }
+                            }
+                        }
+                    }
                 }
-                outPutFilePath = "${cacheDir.absolutePath}/temp_${System.currentTimeMillis()}.zip"
-                ZipFileTool.zipMultiFile(path, outPutFilePath)
-                runCatching {
-                    startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-                        addCategory(Intent.CATEGORY_OPENABLE)
-                        type = "*/application"
-                        putExtra(Intent.EXTRA_TITLE, "app_errors_info_${System.currentTimeMillis().toUtcTime()}.zip")
-                    }, WRITE_REQUEST_CODE)
-                }.onFailure { toast(msg = "Start Android SAF failed") }
             }
         }
     }
@@ -217,14 +240,15 @@ class AppErrorsRecordActivity : BaseActivity<ActivityAppErrorsRecordBinding>() {
     override fun onContextItemSelected(item: MenuItem): Boolean {
         if (item.menuInfo is AdapterContextMenuInfo)
             (item.menuInfo as? AdapterContextMenuInfo?)?.also {
+                val bean = listData.getOrNull(it.position) ?: return super.onContextItemSelected(item)
                 when (item.itemId) {
-                    R.id.aerrors_view_detail -> AppErrorsDetailActivity.start(context = this, listData[it.position])
-                    R.id.aerrors_app_info -> openSelfSetting(listData[it.position].packageName)
+                    R.id.aerrors_view_detail -> AppErrorsDetailActivity.start(context = this, bean)
+                    R.id.aerrors_app_info -> openSelfSetting(bean.packageName)
                     R.id.aerrors_remove_record ->
                         showDialog {
                             title = getString(R.string.notice)
                             msg = getString(R.string.are_you_sure_remove_record)
-                            confirmButton { FrameworkTool.removeAppErrorsInfoData(context, listData[it.position]) { refreshData() } }
+                            confirmButton { FrameworkTool.removeAppErrorsInfoData(context, bean) { refreshData() } }
                             cancelButton()
                         }
                 }

@@ -22,7 +22,6 @@
 package com.fankes.apperrorstracking.data
 
 import com.fankes.apperrorstracking.data.enum.AppErrorsConfigType
-import com.highcapable.yukihookapi.hook.xposed.prefs.data.PrefsData
 
 /**
  * 应用配置模版存储控制类

@@ -25,9 +25,9 @@ package com.fankes.apperrorstracking.utils.tool
 
 import android.app.Application
 import android.widget.CompoundButton
+import android.content.Context
+import com.fankes.apperrorstracking.data.PrefsData
 import com.fankes.apperrorstracking.generated.ModuleAppProperties
-import com.highcapable.yukihookapi.hook.factory.prefs
-import com.highcapable.yukihookapi.hook.xposed.prefs.data.PrefsData
 import com.microsoft.appcenter.AppCenter
 import com.microsoft.appcenter.analytics.Analytics
 import com.microsoft.appcenter.crashes.Crashes
@@ -51,9 +51,11 @@ object AppAnalyticsTool {
      * @return [Boolean]
      */
     private var isEnableAppCenterAnalytics
-        get() = instance?.prefs()?.get(ENABLE_APP_CENTER_ANALYTICS) ?: true
+        get() = instance?.getSharedPreferences("app_errors_config", Context.MODE_PRIVATE)
+            ?.getBoolean(ENABLE_APP_CENTER_ANALYTICS.key, ENABLE_APP_CENTER_ANALYTICS.value) ?: true
         set(value) {
-            instance?.prefs()?.edit { put(ENABLE_APP_CENTER_ANALYTICS, value) }
+            instance?.getSharedPreferences("app_errors_config", Context.MODE_PRIVATE)
+                ?.edit()?.putBoolean(ENABLE_APP_CENTER_ANALYTICS.key, value)?.apply()
         }
 
     /** 是否可用 */

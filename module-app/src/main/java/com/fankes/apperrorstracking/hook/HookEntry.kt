@@ -23,26 +23,31 @@ package com.fankes.apperrorstracking.hook
 
 import com.fankes.apperrorstracking.data.ConfigData
 import com.fankes.apperrorstracking.hook.entity.FrameworkHooker
-import com.highcapable.yukihookapi.annotation.xposed.InjectYukiHookWithXposed
-import com.highcapable.yukihookapi.hook.factory.configs
-import com.highcapable.yukihookapi.hook.factory.encase
-import com.highcapable.yukihookapi.hook.xposed.proxy.IYukiHookXposedInit
+import com.fankes.apperrorstracking.utils.tool.ModuleLog
+import io.github.libxposed.api.XposedModule
+import io.github.libxposed.api.XposedModuleInterface
 
-@InjectYukiHookWithXposed(entryClassName = "AppErrorsTracking", isUsingResourcesHook = false)
-object HookEntry : IYukiHookXposedInit {
+class HookEntry : XposedModule() {
 
-    override fun onInit() = configs {
-        debugLog {
-            tag = "AppErrorsTracking"
-            isRecord = true
-        }
-        isDebug = false
+    override fun onModuleLoaded(param: XposedModuleInterface.ModuleLoadedParam) {
+        super.onModuleLoaded(param)
+        ModuleLog.xposedInterface = this
+        ModuleLog.info("AppErrorsTracking loaded in process: ${param.processName}, isSystemServer: ${param.isSystemServer}")
     }
 
-    override fun onHook() = encase {
-        loadSystem {
-            ConfigData.init(this)
-            loadHooker(FrameworkHooker)
+    override fun onSystemServerStarting(param: XposedModuleInterface.SystemServerStartingParam) {
+        super.onSystemServerStarting(param)
+        ModuleLog.info("onSystemServerStarting: initializing AppErrorsTracking")
+        runCatching {
+            val remotePrefs = getRemotePreferences("default")
+            ConfigData.init(remotePrefs)
+        }.onFailure {
+            ModuleLog.warn("Failed to initialize remote preferences: ${it.message}")
+        }
+        runCatching {
+            FrameworkHooker.init(this, param.classLoader)
+        }.onFailure {
+            ModuleLog.error("Failed to initialize FrameworkHooker", it)
         }
     }
 }

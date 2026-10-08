@@ -25,7 +25,7 @@ package com.fankes.apperrorstracking.data.factory
 
 import android.widget.CompoundButton
 import com.fankes.apperrorstracking.data.ConfigData
-import com.highcapable.yukihookapi.hook.xposed.prefs.data.PrefsData
+import com.fankes.apperrorstracking.data.PrefsData
 
 /**
  * 绑定到 [CompoundButton] 自动设置选中状态
