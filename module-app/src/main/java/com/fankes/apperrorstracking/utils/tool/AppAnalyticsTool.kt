@@ -50,12 +50,18 @@ object AppAnalyticsTool {
      * 是否启用匿名统计收集使用情况功能
      * @return [Boolean]
      */
-    private var isEnableAppCenterAnalytics
+    var isEnabled: Boolean
         get() = instance?.getSharedPreferences("app_errors_config", Context.MODE_PRIVATE)
             ?.getBoolean(ENABLE_APP_CENTER_ANALYTICS.key, ENABLE_APP_CENTER_ANALYTICS.value) ?: true
         set(value) {
             instance?.getSharedPreferences("app_errors_config", Context.MODE_PRIVATE)
                 ?.edit()?.putBoolean(ENABLE_APP_CENTER_ANALYTICS.key, value)?.apply()
+        }
+
+    private var isEnableAppCenterAnalytics: Boolean
+        get() = isEnabled
+        set(value) {
+            isEnabled = value
         }
 
     /** 是否可用 */

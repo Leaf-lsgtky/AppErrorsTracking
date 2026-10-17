@@ -7,41 +7,57 @@
  * and/or modify it under the terms of the GNU Affero General Public License
  * as published by the Free Software Foundation; either
  * version 3 of the License, or any later version.
- *
- * This software is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * and eula along with this software.  If not, see
- * <https://www.gnu.org/licenses/>
- *
- * This file is created by fankes on 2022/6/1.
  */
 package com.fankes.apperrorstracking.ui.activity.errors
 
 import android.content.Context
-import android.os.Build
-import androidx.core.view.isVisible
+import android.os.Bundle
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.appcompat.app.AppCompatActivity
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Article
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Info
+import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.PowerSettingsNew
+import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.fankes.apperrorstracking.R
 import com.fankes.apperrorstracking.bean.AppErrorsDisplayBean
-import com.fankes.apperrorstracking.data.ConfigData
-import com.fankes.apperrorstracking.databinding.ActivityAppErrorsDisplayBinding
-import com.fankes.apperrorstracking.databinding.DiaAppErrorsDisplayBinding
-import com.fankes.apperrorstracking.ui.activity.base.BaseActivity
-import com.fankes.apperrorstracking.utils.factory.colorOf
+import com.fankes.apperrorstracking.ui.theme.AppMiuixTheme
 import com.fankes.apperrorstracking.utils.factory.getSerializableExtraCompat
 import com.fankes.apperrorstracking.utils.factory.navigate
 import com.fankes.apperrorstracking.utils.factory.openSelfSetting
-import com.fankes.apperrorstracking.utils.factory.showDialog
 import com.fankes.apperrorstracking.utils.factory.toast
 import com.fankes.apperrorstracking.utils.tool.FrameworkTool
+import top.yukonga.miuix.kmp.basic.Icon
+import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.basic.TextButton
+import top.yukonga.miuix.kmp.preference.ArrowPreference
+import top.yukonga.miuix.kmp.theme.MiuixTheme
+import top.yukonga.miuix.kmp.window.WindowDialog
 
-class AppErrorsDisplayActivity : BaseActivity<ActivityAppErrorsDisplayBinding>() {
+import android.content.Intent
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+
+class AppErrorsDisplayActivity : AppCompatActivity() {
 
     companion object {
-
         /** 当前实例 - 单例运行 */
         private var instance: AppErrorsDisplayActivity? = null
 
@@ -54,63 +70,203 @@ class AppErrorsDisplayActivity : BaseActivity<ActivityAppErrorsDisplayBinding>()
          * @param appErrorsDisplay 应用异常信息显示
          */
         fun start(context: Context, appErrorsDisplay: AppErrorsDisplayBean) =
-            context.navigate<AppErrorsDisplayActivity>(isOutSide = true) { putExtra(EXTRA_APP_ERRORS_DISPLAY, appErrorsDisplay) }
+            context.navigate<AppErrorsDisplayActivity>(isOutSide = true) {
+                putExtra(EXTRA_APP_ERRORS_DISPLAY, appErrorsDisplay)
+            }
     }
 
-    override fun onCreate() {
+    private val currentDisplayState = mutableStateOf<AppErrorsDisplayBean?>(null)
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
         instance?.finish()
         instance = this
-        val appErrorsDisplay = runCatching { intent?.getSerializableExtraCompat<AppErrorsDisplayBean>(EXTRA_APP_ERRORS_DISPLAY) }.getOrNull()
-            ?: return toastAndFinish(name = "AppErrorsDisplay")
-        /** 设置 Material 3 动态颜色主题 */
-        if (ConfigData.isEnableMaterial3StyleAppErrorsDialog) setTheme(R.style.Theme_AppErrorsTracking_Translucent_Material3)
-        /** 显示对话框 */
-        showDialog<DiaAppErrorsDisplayBinding>(ConfigData.isEnableMaterial3StyleAppErrorsDialog.not()) {
-            title = appErrorsDisplay.title
-            if (ConfigData.isEnableMaterial3StyleAppErrorsDialog && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
-                arrayOf(
-                    binding.appInfoIcon, binding.closeAppIcon,
-                    binding.reopenAppIcon, binding.errorDetailIcon,
-                    binding.mutedIfUnlockIcon, binding.mutedIfRestartIcon
-                ).forEach { it.setColorFilter(resources.colorOf(android.R.color.system_accent1_600)) }
-            binding.processNameText.isVisible = appErrorsDisplay.packageName != appErrorsDisplay.processName
-            binding.appInfoItem.isVisible = appErrorsDisplay.isShowAppInfoButton
-            binding.closeAppItem.isVisible = appErrorsDisplay.isShowReopenButton.not() && appErrorsDisplay.isShowCloseAppButton
-            binding.reopenAppItem.isVisible = appErrorsDisplay.isShowReopenButton
-            binding.processNameText.text = getString(R.string.crash_process, appErrorsDisplay.processName)
-            binding.appInfoItem.setOnClickListener {
-                cancel()
-                openSelfSetting(appErrorsDisplay.packageName)
-            }
-            binding.closeAppItem.setOnClickListener { cancel() }
-            binding.reopenAppItem.setOnClickListener {
-                FrameworkTool.openAppUsedFramework(context, appErrorsDisplay.packageName, appErrorsDisplay.userId)
-                cancel()
-            }
-            binding.errorDetailItem.setOnClickListener {
-                FrameworkTool.fetchAppErrorInfoData(context, appErrorsDisplay.pid) { appErrorsInfo ->
-                    AppErrorsDetailActivity.start(context, appErrorsInfo)
-                    cancel()
-                }
-            }
-            binding.mutedIfUnlockItem.setOnClickListener {
-                FrameworkTool.mutedErrorsIfUnlock(context, appErrorsDisplay.packageName) {
-                    toast(getString(R.string.mute_if_unlock_tip, appErrorsDisplay.appName))
-                    cancel()
-                }
-            }
-            binding.mutedIfRestartItem.setOnClickListener {
-                FrameworkTool.mutedErrorsIfRestart(context, appErrorsDisplay.packageName) {
-                    toast(getString(R.string.mute_if_restart_tip, appErrorsDisplay.appName))
-                    cancel()
-                }
-            }
-            onCancel { finish() }
+
+        supportActionBar?.hide()
+        enableEdgeToEdge()
+
+        val appErrorsDisplay = parseDisplayFromIntent(intent)
+        if (appErrorsDisplay == null) {
+            toast("Invalid AppErrorsDisplay, exit")
+            finish()
+            return
         }
+        currentDisplayState.value = appErrorsDisplay
+
+        setContent {
+            AppMiuixTheme {
+                val display = currentDisplayState.value
+                if (display != null) {
+                    key(display.pid, display.packageName) {
+                        AppErrorsDisplayDialog(
+                            displayBean = display,
+                            onDismiss = { finish() }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val appErrorsDisplay = parseDisplayFromIntent(intent)
+        if (appErrorsDisplay != null) {
+            currentDisplayState.value = appErrorsDisplay
+        }
+    }
+
+    private fun parseDisplayFromIntent(intent: Intent?): AppErrorsDisplayBean? {
+        return runCatching {
+            intent?.getSerializableExtraCompat<AppErrorsDisplayBean>(EXTRA_APP_ERRORS_DISPLAY)
+        }.getOrNull()
     }
 
     override fun onDestroy() {
         super.onDestroy()
         instance = null
+    }
+
+    @Composable
+    private fun AppErrorsDisplayDialog(
+        displayBean: AppErrorsDisplayBean,
+        onDismiss: () -> Unit,
+    ) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            WindowDialog(
+                show = true,
+                title = displayBean.title,
+                onDismissRequest = onDismiss
+            ) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    if (displayBean.packageName != displayBean.processName) {
+                        Text(
+                            text = stringResource(R.string.crash_process, displayBean.processName),
+                            fontSize = 13.sp,
+                            color = MiuixTheme.colorScheme.onSurfaceSecondary,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                        )
+                        Spacer(Modifier.height(4.dp))
+                    }
+
+                    if (displayBean.isShowReopenButton) {
+                        ArrowPreference(
+                            title = stringResource(R.string.reopen_app),
+                            startAction = {
+                                Icon(
+                                    imageVector = Icons.Rounded.Refresh,
+                                    contentDescription = null,
+                                    tint = MiuixTheme.colorScheme.onSurface,
+                                    modifier = Modifier.padding(end = 12.dp)
+                                )
+                            },
+                            onClick = {
+                                FrameworkTool.openAppUsedFramework(
+                                    this@AppErrorsDisplayActivity,
+                                    displayBean.packageName,
+                                    displayBean.userId
+                                )
+                                onDismiss()
+                            }
+                        )
+                    }
+
+                    if (!displayBean.isShowReopenButton && displayBean.isShowCloseAppButton) {
+                        ArrowPreference(
+                            title = stringResource(R.string.close_app),
+                            startAction = {
+                                Icon(
+                                    imageVector = Icons.Rounded.Close,
+                                    contentDescription = null,
+                                    tint = MiuixTheme.colorScheme.onSurface,
+                                    modifier = Modifier.padding(end = 12.dp)
+                                )
+                            },
+                            onClick = onDismiss
+                        )
+                    }
+
+                    ArrowPreference(
+                        title = stringResource(R.string.error_detail),
+                        startAction = {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.Article,
+                                contentDescription = null,
+                                tint = MiuixTheme.colorScheme.onSurface,
+                                modifier = Modifier.padding(end = 12.dp)
+                            )
+                        },
+                        onClick = {
+                            FrameworkTool.fetchAppErrorInfoData(this@AppErrorsDisplayActivity, displayBean.pid) { appErrorsInfo ->
+                                AppErrorsDetailActivity.start(this@AppErrorsDisplayActivity, appErrorsInfo)
+                                onDismiss()
+                            }
+                        }
+                    )
+
+                    if (displayBean.isShowAppInfoButton) {
+                        ArrowPreference(
+                            title = stringResource(R.string.app_info),
+                            startAction = {
+                                Icon(
+                                    imageVector = Icons.Rounded.Info,
+                                    contentDescription = null,
+                                    tint = MiuixTheme.colorScheme.onSurface,
+                                    modifier = Modifier.padding(end = 12.dp)
+                                )
+                            },
+                            onClick = {
+                                openSelfSetting(displayBean.packageName)
+                                onDismiss()
+                            }
+                        )
+                    }
+
+                    ArrowPreference(
+                        title = stringResource(R.string.mute_if_unlock),
+                        startAction = {
+                            Icon(
+                                imageVector = Icons.Rounded.Lock,
+                                contentDescription = null,
+                                tint = MiuixTheme.colorScheme.onSurfaceSecondary,
+                                modifier = Modifier.padding(end = 12.dp)
+                            )
+                        },
+                        onClick = {
+                            FrameworkTool.mutedErrorsIfUnlock(this@AppErrorsDisplayActivity, displayBean.packageName) {
+                                toast(getString(R.string.mute_if_unlock_tip, displayBean.appName))
+                                onDismiss()
+                            }
+                        }
+                    )
+
+                    ArrowPreference(
+                        title = stringResource(R.string.mute_if_restart),
+                        startAction = {
+                            Icon(
+                                imageVector = Icons.Rounded.PowerSettingsNew,
+                                contentDescription = null,
+                                tint = MiuixTheme.colorScheme.onSurfaceSecondary,
+                                modifier = Modifier.padding(end = 12.dp)
+                            )
+                        },
+                        onClick = {
+                            FrameworkTool.mutedErrorsIfRestart(this@AppErrorsDisplayActivity, displayBean.packageName) {
+                                toast(getString(R.string.mute_if_restart_tip, displayBean.appName))
+                                onDismiss()
+                            }
+                        }
+                    )
+
+                    Spacer(Modifier.height(12.dp))
+                    TextButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        text = stringResource(R.string.cancel),
+                        onClick = onDismiss
+                    )
+                }
+            }
+        }
     }
 }

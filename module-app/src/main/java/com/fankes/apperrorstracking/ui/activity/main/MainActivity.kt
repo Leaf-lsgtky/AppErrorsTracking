@@ -7,55 +7,24 @@
  * and/or modify it under the terms of the GNU Affero General Public License
  * as published by the Free Software Foundation; either
  * version 3 of the License, or any later version.
- *
- * This software is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * and eula along with this software.  If not, see
- * <https://www.gnu.org/licenses/>
- *
- * This file is created by fankes on 2022/5/14.
  */
-@file:Suppress("SetTextI18n")
-
 package com.fankes.apperrorstracking.ui.activity.main
 
-import android.os.Build
-import androidx.core.view.isVisible
-import com.fankes.apperrorstracking.R
+import android.app.ActivityManager
+import android.content.Intent
+import android.os.Bundle
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.appcompat.app.AppCompatActivity
 import com.fankes.apperrorstracking.application.AppErrorsApplication
 import com.fankes.apperrorstracking.const.ModuleVersion
-import com.fankes.apperrorstracking.data.ConfigData
-import com.fankes.apperrorstracking.data.factory.bind
-import com.fankes.apperrorstracking.databinding.ActivityMainBinding
-import com.fankes.apperrorstracking.ui.activity.base.BaseActivity
-import com.fankes.apperrorstracking.ui.activity.debug.LoggerActivity
-import com.fankes.apperrorstracking.ui.activity.errors.AppErrorsMutedActivity
-import com.fankes.apperrorstracking.ui.activity.errors.AppErrorsRecordActivity
-import com.fankes.apperrorstracking.utils.factory.hideOrShowLauncherIcon
-import com.fankes.apperrorstracking.utils.factory.isLauncherIconShowing
-import com.fankes.apperrorstracking.utils.factory.isSystemLanguageSimplifiedChinese
-import com.fankes.apperrorstracking.utils.factory.navigate
-import com.fankes.apperrorstracking.utils.factory.openBrowser
-import com.fankes.apperrorstracking.utils.factory.showDialog
-import com.fankes.apperrorstracking.utils.factory.toast
-import com.fankes.apperrorstracking.utils.tool.AppAnalyticsTool
-import com.fankes.apperrorstracking.utils.tool.AppAnalyticsTool.bindAppAnalytics
-import com.fankes.apperrorstracking.utils.tool.FrameworkTool
-import com.fankes.apperrorstracking.utils.tool.GithubReleaseTool
+import com.fankes.apperrorstracking.ui.screen.MainScreen
+import com.fankes.apperrorstracking.ui.theme.AppMiuixTheme
 import com.fankes.projectpromote.ProjectPromote
-import com.highcapable.betterandroid.ui.extension.view.isUnderline
 
-class MainActivity : BaseActivity<ActivityMainBinding>() {
+class MainActivity : AppCompatActivity() {
 
     companion object {
-
-        /** 系统版本 */
-        private val systemVersion = "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}) ${Build.DISPLAY}"
-
         /** 模块是否有效 */
         var isModuleValied = false
 
@@ -64,134 +33,37 @@ class MainActivity : BaseActivity<ActivityMainBinding>() {
             get() = AppErrorsApplication.xposedService != null || isModuleValied
     }
 
-    override fun onCreate() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
         checkingTopComponentName()
-        /** 检查更新 */
-        GithubReleaseTool.checkingForUpdate(context = this, ModuleVersion.NAME) { version, function ->
-            binding.mainTextReleaseVersion.apply {
-                text = getString(R.string.click_to_update, version)
-                isVisible = true
-                setOnClickListener { function() }
-            }
-        }
-        /** 推广、恰饭 */
-        if (isModuleActive) ProjectPromote.show(activity = this, ModuleVersion.toString())
-        /** 显示开发者提示 */
-        if (ConfigData.isShowDeveloperNotice)
-            showDialog {
-                title = getString(R.string.developer_notice)
-                msg = getString(R.string.developer_notice_tip)
-                confirmButton(getString(R.string.got_it)) { ConfigData.isShowDeveloperNotice = false }
-                noCancelable()
-            }
-        /** 设置 CI 自动构建标识 */
-        if (ModuleVersion.isCiMode)
-            binding.mainTextReleaseVersion.apply {
-                text = "CI ${ModuleVersion.GITHUB_COMMIT_ID}"
-                isVisible = true
-                setOnClickListener {
-                    showDialog {
-                        title = getString(R.string.ci_notice_dialog_title)
-                        msg = getString(R.string.ci_notice_dialog_content, ModuleVersion.GITHUB_COMMIT_ID)
-                        confirmButton(getString(R.string.got_it))
-                        noCancelable()
-                    }
-                }
-            }
-        binding.mainTextVersion.text = getString(R.string.module_version, ModuleVersion.NAME)
-        binding.mainTextSystemVersion.text = getString(R.string.system_version, systemVersion)
-        binding.onlyShowErrorsInFrontSwitch.bind(ConfigData.ENABLE_ONLY_SHOW_ERRORS_IN_FRONT)
-        binding.onlyShowErrorsInMainProcessSwitch.bind(ConfigData.ENABLE_ONLY_SHOW_ERRORS_IN_MAIN)
-        binding.alwaysShowsReopenAppOptionsSwitch.bind(ConfigData.ENABLE_ALWAYS_SHOWS_REOPEN_APP_OPTIONS)
-        binding.shareWithFile.bind(ConfigData.SHARE_WITH_FILE)
-        binding.enableAppsConfigsTemplateSwitch.bind(ConfigData.ENABLE_APP_CONFIG_TEMPLATE) {
-            onInitialize { binding.mgrAppsConfigsTemplateButton.isVisible = it }
-            onChanged { reinitialize() }
-        }
-        binding.errorsDialogPreventMisoperationSwitch.bind(ConfigData.ENABLE_PREVENT_MISOPERATION_FOR_DIALOG)
-        binding.enableMaterial3AppErrorsDialogSwitch.bind(ConfigData.ENABLE_MATERIAL3_STYLE_APP_ERRORS_DIALOG)
-        /** 设置匿名统计 */
-        binding.appAnalyticsConfigItem.isVisible = AppAnalyticsTool.isAvailable
-        binding.enableAnonymousStatisticsSwitch.bindAppAnalytics()
-        /** 系统版本点击事件 */
-        binding.mainTextSystemVersion.setOnClickListener {
-            showDialog {
-                title = getString(R.string.notice)
-                msg = systemVersion
-                confirmButton(getString(R.string.got_it))
-            }
-        }
-        /** 管理应用配置模板按钮点击事件 */
-        binding.mgrAppsConfigsTemplateButton.setOnClickListener { whenActivated { navigate<ConfigureActivity>() } }
-        /** 功能管理按钮点击事件 */
-        binding.viewErrorsRecordButton.setOnClickListener { whenActivated { navigate<AppErrorsRecordActivity>() } }
-        binding.viewMutedErrorsAppsButton.setOnClickListener { whenActivated { navigate<AppErrorsMutedActivity>() } }
-        /** 调试日志按钮点击事件 */
-        binding.titleLoggerIcon.setOnClickListener { navigate<LoggerActivity>() }
-        /** 重启按钮点击事件 */
-        binding.titleRestartIcon.setOnClickListener { FrameworkTool.restartSystem(context = this) }
-        /** 项目地址按钮点击事件 */
-        binding.titleGithubIcon.setOnClickListener { openBrowser(url = "https://github.com/KitsunePie/AppErrorsTracking") }
-        /** 恰饭！ */
-        binding.paymentFollowingZhCnItem.isVisible = isSystemLanguageSimplifiedChinese
-        binding.linkWithFollowMe.isUnderline = true
-        binding.linkWithFollowMe.setOnClickListener {
-            openBrowser(url = "https://www.coolapk.com/u/876977", packageName = "com.coolapk.market")
-        }
-        /** 设置桌面图标显示隐藏 */
-        binding.hideIconInLauncherSwitch.isChecked = isLauncherIconShowing.not()
-        binding.hideIconInLauncherSwitch.setOnCheckedChangeListener { btn, b ->
-            if (btn.isPressed.not()) return@setOnCheckedChangeListener
-            hideOrShowLauncherIcon(b)
-        }
-    }
+        supportActionBar?.hide()
+        enableEdgeToEdge()
 
-    /** 刷新模块状态 */
-    private fun refreshModuleStatus() {
-        val isActive = isModuleActive
-        binding.mainLinStatus.setBackgroundResource(
-            when {
-                isActive && isModuleValied.not() -> R.drawable.bg_yellow_round
-                isActive -> R.drawable.bg_green_round
-                else -> R.drawable.bg_dark_round
-            }
-        )
-        binding.mainImgStatus.setImageResource(
-            when {
-                isActive -> R.drawable.ic_success
-                else -> R.drawable.ic_warn
-            }
-        )
-        binding.mainTextStatus.text = when {
-            isActive && isModuleValied.not() -> getString(R.string.module_not_fully_activated)
-            isActive -> getString(R.string.module_is_activated)
-            else -> getString(R.string.module_not_activated)
+        if (isModuleActive) {
+            ProjectPromote.show(activity = this, ModuleVersion.toString())
         }
-        binding.mainTextApiWay.isVisible = isActive
-        val service = AppErrorsApplication.xposedService
-        binding.mainTextApiWay.text = if (service != null) {
-            "Activated by ${service.frameworkName} API ${service.apiVersion}"
-        } else {
-            "Activated by libxposed (System Framework)"
+
+        setContent {
+            AppMiuixTheme {
+                MainScreen()
+            }
         }
     }
 
     /**
-     * 当模块激活后才能执行相应功能
-     * @param callback 激活后回调
+     * 在旧版的 Android 系统中使用了 activity-alias 标签从启动器启动 Activity 会造成其组件名称 (完整类名) 为代理名称
+     *
+     * 为了获取真实的顶层 Activity 组件名称 (完整类名) - 如果名称不正确将自动执行一次结束并重新打开当前 Activity
      */
-    private inline fun whenActivated(callback: () -> Unit) {
-        if (isModuleActive) callback() else toast(getString(R.string.module_not_activated))
-    }
-
-    override fun onResume() {
-        super.onResume()
-        /** 刷新模块状态 */
-        refreshModuleStatus()
-        /** 检查模块激活状态 */
-        FrameworkTool.checkingActivated(context = this) { isValied ->
-            isModuleValied = isValied
-            refreshModuleStatus()
+    private fun checkingTopComponentName() {
+        val topComponentName = runCatching {
+            @Suppress("DEPRECATION")
+            (getSystemService(ACTIVITY_SERVICE) as? ActivityManager?)
+                ?.getRunningTasks(9999)?.firstOrNull()?.topActivity?.className ?: ""
+        }.getOrNull() ?: ""
+        if (topComponentName.isNotBlank() && topComponentName != javaClass.name) {
+            finish()
+            startActivity(Intent(this, javaClass))
         }
     }
 }

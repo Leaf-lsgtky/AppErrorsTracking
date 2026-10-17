@@ -195,6 +195,7 @@ object FrameworkHooker {
             runCatching {
                 (findField(proc.javaClass, "mPid")?.get(proc) as? Int)
                     ?: (findField(proc.javaClass, "pid")?.get(proc) as? Int)
+                    ?: (proc.javaClass.methods.firstOrNull { it.name == "getPid" && it.parameterTypes.isEmpty() }?.invoke(proc) as? Int)
                     ?: 0
             }.getOrNull() ?: 0
         }
@@ -302,12 +303,21 @@ object FrameworkHooker {
                     }
                     onPushAppErrorInfoData { id ->
                         val timestamp = id.toLongOrNull()
-                        val pid = id.toIntOrNull() ?: 0
-                        (if (timestamp != null && timestamp > 0L) {
+                        val isTimestamp = timestamp != null && timestamp > 1_000_000_000_000L
+                        if (isTimestamp) {
                             AppErrorsRecordData.allData.firstOrNull { e -> e.timestamp == timestamp }
-                        } else null) ?: AppErrorsRecordData.allData.firstOrNull { e -> e.pid == pid } ?: run {
-                            ModuleLog.warn("Cannot find crash application data --id $id")
-                            AppErrorsInfoBean()
+                                ?: run {
+                                    ModuleLog.warn("Cannot find crash application data by timestamp --id $id")
+                                    AppErrorsInfoBean()
+                                }
+                        } else {
+                            val pid = id.toIntOrNull() ?: 0
+                            (if (pid > 0) AppErrorsRecordData.allData.firstOrNull { e -> e.pid == pid } else null)
+                                ?: AppErrorsRecordData.allData.firstOrNull()
+                                ?: run {
+                                    ModuleLog.warn("Cannot find crash application data by pid --id $id")
+                                    AppErrorsInfoBean()
+                                }
                         }
                     }
                     onPushAppErrorsInfoData {

@@ -7,56 +7,27 @@
  * and/or modify it under the terms of the GNU Affero General Public License
  * as published by the Free Software Foundation; either
  * version 3 of the License, or any later version.
- *
- * This software is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Affero General Public License for more details.
- *
- * You should have received a copy of the GNU Affero General Public License
- * and eula along with this software.  If not, see
- * <https://www.gnu.org/licenses/>
- *
- * This file is created by fankes on 2022/5/7.
  */
-@file:Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
-
 package com.fankes.apperrorstracking.ui.activity.errors
 
-import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
-import android.widget.TextView
-import androidx.core.content.FileProvider
-import androidx.core.view.isGone
-import androidx.core.view.isVisible
-import com.fankes.apperrorstracking.R
+import android.os.Bundle
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.appcompat.app.AppCompatActivity
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
 import com.fankes.apperrorstracking.bean.AppErrorsInfoBean
-import com.fankes.apperrorstracking.data.ConfigData
-import com.fankes.apperrorstracking.data.factory.bind
-import com.fankes.apperrorstracking.databinding.ActivityAppErrorsDetailBinding
-import com.fankes.apperrorstracking.ui.activity.base.BaseActivity
-import com.fankes.apperrorstracking.utils.factory.appIconOf
-import com.fankes.apperrorstracking.utils.factory.appNameOf
-import com.fankes.apperrorstracking.utils.factory.copyToClipboard
-import com.fankes.apperrorstracking.utils.factory.dp
+import com.fankes.apperrorstracking.ui.screen.detail.DetailScreen
+import com.fankes.apperrorstracking.ui.theme.AppMiuixTheme
 import com.fankes.apperrorstracking.utils.factory.getSerializableExtraCompat
 import com.fankes.apperrorstracking.utils.factory.navigate
-import com.fankes.apperrorstracking.utils.factory.openSelfSetting
-import com.fankes.apperrorstracking.utils.factory.showDialog
 import com.fankes.apperrorstracking.utils.factory.toast
-import com.fankes.apperrorstracking.utils.tool.FrameworkTool
-import com.fankes.apperrorstracking.utils.tool.ModuleLog
-import com.fankes.apperrorstracking.utils.tool.StackTraceShareHelper
-import java.io.File
 
-class AppErrorsDetailActivity : BaseActivity<ActivityAppErrorsDetailBinding>() {
+class AppErrorsDetailActivity : AppCompatActivity() {
 
     companion object {
-
-        /** 请求保存文件回调标识 */
-        private const val WRITE_REQUEST_CODE = 0
-
         /** [AppErrorsInfoBean] 传值 */
         private const val EXTRA_APP_ERRORS_INFO = "app_errors_info_extra"
 
@@ -69,182 +40,48 @@ class AppErrorsDetailActivity : BaseActivity<ActivityAppErrorsDetailBinding>() {
             context.navigate<AppErrorsDetailActivity> { putExtra(EXTRA_APP_ERRORS_INFO, appErrorsInfo) }
     }
 
-    /** 预导出的异常堆栈 */
-    private var stackTrace = ""
+    private val currentErrorState = mutableStateOf<AppErrorsInfoBean?>(null)
 
-    override fun onCreate() {
-        if (initUi(intent).not()) return
-        binding.titleBackIcon.setOnClickListener { onBackPressed() }
-        binding.disableAutoWrapErrorStackTraceSwitch.bind(ConfigData.DISABLE_AUTO_WRAP_ERROR_STACK_TRACE) {
-            onInitialize {
-                binding.errorStackTraceScrollView.isVisible = it
-                binding.errorStackTraceFixedText.isGone = it
-            }
-            onChanged {
-                reinitialize()
-                resetScrollView()
-            }
-        }
-        binding.detailTitleText.setOnClickListener { binding.appPanelScrollView.smoothScrollTo(0, 0) }
-        resetScrollView()
-    }
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        supportActionBar?.hide()
+        enableEdgeToEdge()
 
-    /**
-     * 从 [Intent] 中解析 [AppErrorsInfoBean] 并加载至界面
-     *
-     * @param intent 用于获取并解析 [AppErrorsInfoBean] 的 [Intent] 实例
-     * @return [Boolean] 是否解析成功：true 为成功；false 为失败，可能是 [Intent] 为空或者 [AppErrorsInfoBean] 为空
-     */
-    private fun initUi(intent: Intent?): Boolean {
-        val appErrorsInfo = runCatching { intent?.getSerializableExtraCompat<AppErrorsInfoBean>(EXTRA_APP_ERRORS_INFO) }.getOrNull()
-        if (appErrorsInfo == null) {
-            toastAndFinish(name = "AppErrorsInfo")
-            return false
+        val appErrorsInfo = parseErrorFromIntent(intent)
+        if (appErrorsInfo == null || appErrorsInfo.isEmpty) {
+            toast("Unable to get app error details")
+            finish()
+            return
         }
-        if (appErrorsInfo.isEmpty) {
-            binding.appPanelScrollView.isVisible = false
-            showDialog {
-                title = getString(R.string.notice)
-                msg = getString(R.string.unable_get_app_errors_record_tip)
-                confirmButton(getString(R.string.got_it)) {
-                    cancel()
-                    finish()
-                }
-                cancelButton(getString(R.string.go_it_now)) {
-                    cancel()
-                    finish()
-                    navigate<AppErrorsRecordActivity>()
-                }
-                noCancelable()
-            }
-            return false
-        }
-        binding.appInfoItem.setOnClickListener { openSelfSetting(appErrorsInfo.packageName) }
-        binding.printIcon.setOnClickListener {
-            ModuleLog.error(appErrorsInfo.stackTrace)
-            toast(getString(R.string.print_to_logcat_success))
-        }
-        binding.copyIcon.setOnClickListener {
-            StackTraceShareHelper.showChoose(context = this, getString(R.string.copy_error_stack)) { sDeviceBrand, sDeviceModel, sDisplay, sPackageName ->
-                copyToClipboard(appErrorsInfo.stackOutputShareContent(sDeviceBrand, sDeviceModel, sDisplay, sPackageName))
-            }
-        }
-        binding.exportIcon.setOnClickListener {
-            StackTraceShareHelper.showChoose(context = this, getString(R.string.export_to_file)) { sDeviceBrand, sDeviceModel, sDisplay, sPackageName ->
-                stackTrace = appErrorsInfo.stackOutputFileContent(sDeviceBrand, sDeviceModel, sDisplay, sPackageName)
-                runCatching {
-                    startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-                        addCategory(Intent.CATEGORY_OPENABLE)
-                        type = "*/application"
-                        val packageName = if (sPackageName) appErrorsInfo.packageName else "anonymous"
-                        putExtra(Intent.EXTRA_TITLE, "${packageName}_${appErrorsInfo.utcTime}.log")
-                    }, WRITE_REQUEST_CODE)
-                }.onFailure { toast(msg = "Start Android SAF failed") }
-            }
-        }
-        binding.shareIcon.setOnClickListener {
-            StackTraceShareHelper.showChoose(context = this, getString(R.string.share_error_stack)) { sDeviceBrand, sDeviceModel, sDisplay, sPackageName ->
-                startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
-                    val content = appErrorsInfo.stackOutputShareContent(sDeviceBrand, sDeviceModel, sDisplay, sPackageName)
-                    if (ConfigData.isShareWithFile) {
-                        type = "application/octet-stream"
-                        runCatching {
-                            val file = File.createTempFile("app_errors_stacktrace_", ".log", cacheDir)
-                            file.deleteOnExit()
-                            file.writeText(content)
-                            val uri = FileProvider.getUriForFile(this@AppErrorsDetailActivity, "$packageName.provider", file)
-                            putExtra(Intent.EXTRA_STREAM, uri)
-                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                        }.onFailure {
-                            toast(msg = "Create temp file failed")
-                        }
-                    } else {
-                        type = "text/plain"
-                        putExtra(Intent.EXTRA_TEXT, content)
+        currentErrorState.value = appErrorsInfo
+
+        setContent {
+            AppMiuixTheme {
+                val error = currentErrorState.value
+                if (error != null && !error.isEmpty) {
+                    key(error.timestamp, error.pid) {
+                        DetailScreen(
+                            initialError = error,
+                            onBack = { finish() }
+                        )
                     }
-                }, getString(R.string.share_error_stack)))
-            }
-        }
-        binding.appIcon.setImageDrawable(appIconOf(appErrorsInfo.packageName))
-        binding.appNameText.text = appNameOf(appErrorsInfo.packageName).ifBlank { appErrorsInfo.packageName }
-        binding.appVersionText.text = appErrorsInfo.versionBrand
-        binding.appUserIdText.isVisible = appErrorsInfo.userId > 0
-        binding.appUserIdText.text = getString(R.string.user_id, appErrorsInfo.userId)
-        binding.appCpuAbiText.text = appErrorsInfo.cpuAbi.ifBlank { getString(R.string.no_cpu_abi) }
-        binding.appTargetSdkText.text = getString(R.string.app_target_sdk, appErrorsInfo.targetSdk)
-        binding.appMinSdkText.text = getString(R.string.app_min_sdk, appErrorsInfo.minSdk)
-        binding.jvmErrorPanel.isGone = appErrorsInfo.isNativeCrash
-        binding.errorTypeIcon.setImageResource(if (appErrorsInfo.isNativeCrash) R.drawable.ic_cpp else R.drawable.ic_java)
-        binding.errorInfoText.text = appErrorsInfo.exceptionMessage
-        binding.errorTypeText.text = appErrorsInfo.exceptionClassName
-        binding.errorFileNameText.text = appErrorsInfo.throwFileName
-        binding.errorThrowClassText.text = appErrorsInfo.throwClassName
-        binding.errorThrowMethodText.text = appErrorsInfo.throwMethodName
-        binding.errorLineNumberText.text = appErrorsInfo.throwLineNumber.toString()
-        binding.errorRecordTimeText.text = appErrorsInfo.dateTime
-        binding.errorStackTraceMovableText.text = appErrorsInfo.stackTrace
-        binding.errorStackTraceFixedText.text = appErrorsInfo.stackTrace
-        if (appErrorsInfo.stackTrace.isEmpty()) {
-            FrameworkTool.fetchAppErrorInfoData(this, appErrorsInfo.timestamp) { fullBean ->
-                if (isFinishing || isDestroyed) return@fetchAppErrorInfoData
-                if (!fullBean.isEmpty) {
-                    appErrorsInfo.stackTrace = fullBean.stackTrace
-                    appErrorsInfo.throwFileName = fullBean.throwFileName
-                    appErrorsInfo.throwClassName = fullBean.throwClassName
-                    appErrorsInfo.throwMethodName = fullBean.throwMethodName
-                    appErrorsInfo.throwLineNumber = fullBean.throwLineNumber
-                    appErrorsInfo.cpuAbi = fullBean.cpuAbi
-                    appErrorsInfo.versionName = fullBean.versionName
-                    appErrorsInfo.versionCode = fullBean.versionCode
-                    appErrorsInfo.targetSdk = fullBean.targetSdk
-                    appErrorsInfo.minSdk = fullBean.minSdk
-                    binding.errorStackTraceMovableText.text = fullBean.stackTrace
-                    binding.errorStackTraceFixedText.text = fullBean.stackTrace
-                    binding.errorFileNameText.text = fullBean.throwFileName
-                    binding.errorThrowClassText.text = fullBean.throwClassName
-                    binding.errorThrowMethodText.text = fullBean.throwMethodName
-                    binding.errorLineNumberText.text = fullBean.throwLineNumber.toString()
-                    binding.appCpuAbiText.text = fullBean.cpuAbi.ifBlank { getString(R.string.no_cpu_abi) }
-                    binding.appTargetSdkText.text = getString(R.string.app_target_sdk, fullBean.targetSdk)
-                    binding.appMinSdkText.text = getString(R.string.app_min_sdk, fullBean.minSdk)
-                    binding.appVersionText.text = fullBean.versionBrand
                 }
             }
         }
-        binding.appPanelScrollView.setOnScrollChangeListener { _, _, y, _, _ ->
-            binding.detailTitleText.text = if (y >= 30.dp(context = this@AppErrorsDetailActivity))
-                appNameOf(appErrorsInfo.packageName).ifBlank { appErrorsInfo.packageName }
-            else getString(R.string.app_name)
-        }
-        return true
-    }
-
-    /** 修复在一些小屏设备上设置了 [TextView.setTextIsSelectable] 后布局自动上滑问题 */
-    private fun resetScrollView() {
-        binding.rootView.post {
-            binding.appPanelScrollView.scrollTo(0, 0)
-            binding.errorStackTraceScrollView.scrollTo(0, 0)
-        }
-    }
-
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == WRITE_REQUEST_CODE && resultCode == RESULT_OK) runCatching {
-            data?.data?.let {
-                contentResolver?.openOutputStream(it)?.apply { write(stackTrace.toByteArray()) }?.close()
-                toast(getString(R.string.output_stack_success))
-            } ?: toast(getString(R.string.output_stack_fail))
-        }.onFailure { toast(getString(R.string.output_stack_fail)) }
-    }
-
-    @SuppressLint("GestureBackNavigation")
-    override fun onBackPressed() {
-        intent?.removeExtra(EXTRA_APP_ERRORS_INFO)
-        super.onBackPressed()
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        if (initUi(intent)) binding.appPanelScrollView.scrollTo(0, 0)
+        setIntent(intent)
+        val appErrorsInfo = parseErrorFromIntent(intent)
+        if (appErrorsInfo != null && !appErrorsInfo.isEmpty) {
+            currentErrorState.value = appErrorsInfo
+        }
+    }
+
+    private fun parseErrorFromIntent(intent: Intent?): AppErrorsInfoBean? {
+        return runCatching {
+            intent?.getSerializableExtraCompat<AppErrorsInfoBean>(EXTRA_APP_ERRORS_INFO)
+        }.getOrNull()
     }
 }

@@ -226,4 +226,13 @@ object ConfigData {
         set(value) {
             putBoolean(SHARE_WITH_FILE, value)
         }
+
+    /**
+     * 是否禁止异常堆栈内容自动换行
+     */
+    var isDisableAutoWrapErrorStackTrace
+        get() = getBoolean(DISABLE_AUTO_WRAP_ERROR_STACK_TRACE)
+        set(value) {
+            putBoolean(DISABLE_AUTO_WRAP_ERROR_STACK_TRACE, value)
+        }
 }

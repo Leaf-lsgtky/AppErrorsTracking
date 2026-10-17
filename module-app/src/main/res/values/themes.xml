@@ -1,6 +1,8 @@
 <resources>
     <!-- Base application theme. -->
-    <style name="Theme.AppErrorsTracking" parent="Theme.Material3.DayNight">
+    <style name="Theme.AppErrorsTracking" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
         <!-- Primary brand color. -->
         <item name="colorPrimary">@color/colorPrimaryAccent</item>
         <item name="colorPrimaryVariant">@color/colorPrimaryAccent</item>
